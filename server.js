@@ -56,6 +56,7 @@ app.post("/admin/ingest/run", async (req, res) => {
   }
 });
 
+app.get("/health", (_req, res) => res.send("ok"));
 
 app.post("/twilio/whatsapp", async (req, res) => {
   try {
