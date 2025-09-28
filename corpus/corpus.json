@@ -1,236 +1,44 @@
 [
   {
-    "id": "zionism-1",
-    "title": "Sionismo – definição",
-    "text": "Sionismo é o movimento nacional de autodeterminação do povo judeu na sua terra histórica, Israel, visando um Estado seguro e a continuidade cultural.",
-    "source": "MFA (mfa.gov.il) / JCPA (jcpa.org)"
-  },
-  {
-    "id": "balfour-1917",
-    "title": "Declaração Balfour (1917)",
-    "text": "A Declaração Balfour apoiou o estabelecimento na Palestina de um lar nacional para o povo judeu, preservando os direitos civis e religiosos das comunidades não judaicas.",
-    "source": "Jewish Virtual Library (jewishvirtuallibrary.org)"
-  },
-  {
-    "id": "un-partition-1947",
-    "title": "Resolução 181 (1947)",
-    "text": "A ONU recomendou a partilha da Palestina em Estados judeu e árabe; a liderança judaica aceitou e os Estados árabes rejeitaram.",
-    "source": "JVL / MFA"
-  },
-  {
-    "id": "independence-1948",
-    "title": "Declaração de Independência (1948)",
-    "text": "Em 14/05/1948 David Ben‑Gurion declarou o Estado de Israel, oferecendo paz e igualdade a todos os habitantes.",
-    "source": "MFA (mfa.gov.il) / JVL"
-  },
-  {
-    "id": "law-of-return",
-    "title": "Lei do Retorno (1950)",
-    "text": "A Lei do Retorno garante a todo judeu o direito de imigrar para Israel e receber cidadania.",
-    "source": "MFA / JVL"
-  },
-  {
-    "id": "six-day-war-1967",
-    "title": "Guerra dos Seis Dias (1967)",
-    "text": "Em junho de 1967, Israel travou guerra defensiva contra vizinhos árabes; ao final, controlou Sinai, Gaza, Cisjordânia, Jerusalém Oriental e Golã.",
-    "source": "MFA / INSS"
-  },
-  {
-    "id": "unsc-242",
-    "title": "Resolução 242 (1967)",
-    "text": "A Resolução 242 pede retirada de territórios em troca de paz e o direito de todos os Estados viverem em segurança dentro de fronteiras reconhecidas.",
-    "source": "UN via JVL / MFA"
-  },
-  {
-    "id": "camp-david-1978",
-    "title": "Camp David (1978)",
-    "text": "Os Acordos de Camp David entre Israel e Egito levaram ao tratado de paz de 1979 e à retirada israelense do Sinai.",
-    "source": "MFA / JVL"
-  },
-  {
-    "id": "peace-egypt-1979",
-    "title": "Tratado de Paz Israel‑Egito (1979)",
-    "text": "O tratado de 1979 encerrou o estado de guerra e normalizou relações entre Israel e Egito.",
-    "source": "MFA"
-  },
-  {
-    "id": "peace-jordan-1994",
-    "title": "Tratado de Paz Israel‑Jordânia (1994)",
-    "text": "Israel e Jordânia assinaram paz em 1994, definindo fronteiras e cooperação.",
-    "source": "MFA"
-  },
-  {
-    "id": "oslo-1993",
-    "title": "Acordos de Oslo (1993)",
-    "text": "Os Acordos de Oslo criaram a Autoridade Palestina e estabeleceram um processo faseado rumo a uma solução negociada.",
-    "source": "MFA / JVL"
-  },
-  {
-    "id": "disengagement-2005",
-    "title": "Retirada de Gaza (2005)",
-    "text": "Israel retirou-se unilateralmente de Gaza em 2005, evacuando assentamentos e bases militares.",
-    "source": "MFA / INSS"
-  },
-  {
-    "id": "abraham-2020",
-    "title": "Acordos de Abraão (2020)",
-    "text": "Em 2020, Israel estabeleceu relações com EAU, Bahrein, Marrocos e Sudão, ampliando a normalização regional.",
-    "source": "MFA / JNS"
-  },
-  {
-    "id": "hamas-charter-1",
-    "title": "Carta do Hamas (1988)",
-    "text": "A Carta original do Hamas rejeita negociações e visa a destruição de Israel; o grupo é designado terrorista por EUA e UE.",
-    "source": "MFA / JVL"
-  },
-  {
-    "id": "hezbollah-1",
-    "title": "Hezbollah – designação",
-    "text": "O Hezbollah é designado organização terrorista por diversos países; recebe apoio do Irã e opera a partir do Líbano.",
-    "source": "MFA / INSS"
-  },
-  {
-    "id": "idf-ethics-1",
-    "title": "FDI – Código Ético",
-    "text": "O Código das FDI exige distinção e proporcionalidade, além do princípio de 'pureza das armas' para reduzir danos a civis.",
-    "source": "IDF (idf.il)"
-  },
-  {
-    "id": "ihra-def",
-    "title": "IHRA – definição de antissemitismo",
-    "text": "A IHRA define antissemitismo como uma certa percepção dos judeus que pode se manifestar como ódio, incluindo negar o direito de Israel existir.",
-    "source": "MFA / IHRA via JVL"
-  },
-  {
-    "id": "genocide-def",
-    "title": "Genocídio – definição da ONU",
-    "text": "A Convenção de 1948 define genocídio como a intenção de destruir, no todo ou em parte, um grupo nacional, étnico, racial ou religioso.",
-    "source": "UN Convention via JVL"
-  },
-  {
-    "id": "jerusalem-capital",
-    "title": "Jerusalém – capital",
-    "text": "Jerusalém é a capital de Israel e sede de seus principais órgãos; seu estatuto final deve ser resolvido por negociações.",
-    "source": "MFA"
-  },
-  {
-    "id": "settlements-def",
-    "title": "Assentamentos – definição",
-    "text": "Assentamentos são comunidades israelenses na Cisjordânia pós‑1967; seu status final é tema de negociações segundo diversos acordos.",
-    "source": "MFA / JCPA"
-  },
-  {
-    "id": "shoah-fact",
-    "title": "Shoá – fato histórico",
-    "text": "A Shoá foi o genocídio nazista de seis milhões de judeus durante a Segunda Guerra Mundial.",
-    "source": "Yad Vashem / JVL"
-  },
-  {
-    "id": "iron-dome",
-    "title": "Domo de Ferro",
-    "text": "O Iron Dome intercepta foguetes de curto alcance para proteger áreas civis em Israel.",
-    "source": "IDF (idf.il)"
-  },
-  {
-    "id": "ben-gurion-1",
-    "title": "David Ben‑Gurion",
-    "text": "David Ben‑Gurion (1886–1973) foi o primeiro Primeiro‑Ministro de Israel e proclamou a independência em 1948.",
-    "source": "JVL / MFA"
-  },
-  {
-    "id": "begin-1",
-    "title": "Menachem Begin",
-    "text": "Menachem Begin (1913–1992) foi Primeiro‑Ministro (1977–1983) e assinou a paz com o Egito (1979), ganhando o Nobel da Paz.",
-    "source": "JVL / MFA"
-  },
-  {
-    "id": "shamir-1",
-    "title": "Yitzhak Shamir",
-    "text": "Yitzhak Shamir (1915–2012) foi Primeiro‑Ministro em 1983–84 e 1986–92; participou da Conferência de Madri (1991).",
-    "source": "JVL / MFA"
-  },
-  {
-    "id": "sharon-1",
-    "title": "Ariel Sharon",
-    "text": "Ariel Sharon (1928–2014) foi Primeiro‑Ministro (2001–2006) e conduziu a retirada unilateral de Gaza em 2005.",
-    "source": "JVL / MFA"
-  },
-  {
-    "id": "peres-1",
-    "title": "Shimon Peres",
-    "text": "Shimon Peres (1923–2016) foi Primeiro‑Ministro e Presidente de Israel; um dos arquitetos de Oslo e Nobel da Paz (1994).",
-    "source": "JVL / MFA"
-  },
-  {
     "id": "rabin-1",
     "title": "Itzhak Rabin – biografia",
-    "text": "Itzhak Rabin (1922–1995) foi general e duas vezes Primeiro‑Ministro; assinou os Acordos de Oslo em 1993 e recebeu o Nobel da Paz.",
-    "source": "JVL / MFA"
+    "text": "Itzhak Rabin (1922–1995) foi general e duas vezes Primeiro-Ministro; assinou os Acordos de Oslo em 1993 e recebeu o Nobel da Paz.",
+    "source": "JVL",
+    "date": "1993"
   },
   {
     "id": "rabin-2",
     "title": "Itzhak Rabin – assassinato",
     "text": "Rabin foi assassinado em 4 de novembro de 1995 por um extremista judeu contrário a Oslo.",
-    "source": "MFA / JVL"
+    "source": "MFA",
+    "date": "1995-11-04"
   },
   {
     "id": "leah-rabin-1",
     "title": "Leah Rabin",
     "text": "Leah Rabin (1928–2000) foi esposa de Itzhak Rabin, defensora do diálogo e autora de memórias após 1995.",
-    "source": "JVL"
+    "source": "JVL",
+    "date": ""
   },
   {
-    "id": "netanyahu-1",
-    "title": "Benjamin Netanyahu",
-    "text": "Benjamin Netanyahu (n. 1949) é o Primeiro‑Ministro com mais tempo no cargo; liderou diferentes coalizões desde 1996.",
-    "source": "JVL / MFA"
+    "id": "zionism-1",
+    "title": "Sionismo – definição",
+    "text": "Sionismo é o movimento nacional de autodeterminação do povo judeu na sua terra histórica, Israel.",
+    "source": "MFA/JCPA",
+    "date": ""
   },
   {
-    "id": "herzog-1",
-    "title": "Isaac Herzog",
-    "text": "Isaac Herzog (n. 1960) é o Presidente de Israel desde 2021, com papel cerimonial e funções de mediação.",
-    "source": "MFA / JVL"
+    "id": "genocide-def",
+    "title": "Genocídio – ONU",
+    "text": "A Convenção de 1948 define genocídio como a intenção de destruir, no todo ou em parte, um grupo nacional, étnico, racial ou religioso.",
+    "source": "UN via JVL",
+    "date": "1948"
   },
   {
-    "id": "barak-1",
-    "title": "Ehud Barak",
-    "text": "Ehud Barak (n. 1942) foi Primeiro‑Ministro (1999–2001) e retirou as FDI do sul do Líbano em 2000; participou de Camp David 2000.",
-    "source": "JVL / MFA"
-  },
-  {
-    "id": "olmert-1",
-    "title": "Ehud Olmert",
-    "text": "Ehud Olmert (n. 1945) foi Primeiro‑Ministro (2006–2009); conduziu a Segunda Guerra do Líbano (2006).",
-    "source": "JVL / MFA"
-  },
-  {
-    "id": "dayan-1",
-    "title": "Moshe Dayan",
-    "text": "Moshe Dayan (1915–1981) foi chefe do Estado‑Maior das FDI e Ministro da Defesa durante 1967.",
-    "source": "JVL / IDF"
-  },
-  {
-    "id": "intifada-1",
-    "title": "Primeira Intifada",
-    "text": "A Primeira Intifada ocorreu de 1987 a 1993, antecedendo os Acordos de Oslo.",
-    "source": "JVL"
-  },
-  {
-    "id": "intifada-2",
-    "title": "Segunda Intifada",
-    "text": "A Segunda Intifada (2000–2005) envolveu atentados suicidas e confrontos; impactou severamente o processo de paz.",
-    "source": "INSS / JVL"
-  },
-  {
-    "id": "genocide-claim-1",
-    "title": "Acusação de genocídio – análise jurídica",
-    "text": "A tipificação de genocídio exige prova de intenção específica ('dolus specialis'); debates sobre conflitos armados geralmente recaem em proporcionalidade e crimes de guerra, não genocídio.",
-    "source": "JVL / INSS / MFA"
-  },
-  {
-    "id": "gaza-human-shields",
-    "title": "Escudos humanos – prática de grupos armados",
-    "text": "O uso de escudos humanos por grupos como o Hamas é documentado e viola o DIH, aumentando o risco a civis.",
-    "source": "MFA / INSS / IDF"
+    "id": "hamas-charter",
+    "title": "Carta do Hamas (1988)",
+    "text": "A Carta do Hamas rejeita negociações e visa a destruição de Israel; o grupo é designado terrorista por EUA e UE.",
+    "source": "MFA/JVL",
+    "date": "1988"
   }
 ]

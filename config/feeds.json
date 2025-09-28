@@ -1,0 +1,19 @@
+{
+  "rss": [
+    "https://www.idf.il/en/rss",
+    "https://mfa.gov.il/MFA/PressRoom/rss.xml",
+    "https://www.timesofisrael.com/feed/",
+    "https://www.jns.org/feed/",
+    "https://www.jpost.com/Rss/RssFeedsLatestNews.aspx",
+    "https://www.gov.il/en/departments/news?skip=0&limit=20&format=rss",
+    "https://www.police.gov.il/rss",
+    "https://www.mdais.org/en/rss"
+  ],
+  "sitemaps": [
+    "https://mfa.gov.il/sitemap.xml",
+    "https://www.idf.il/sitemap.xml",
+    "https://www.gov.il/sitemap.xml",
+    "https://www.jns.org/sitemap.xml",
+    "https://www.timesofisrael.com/sitemap.xml"
+  ]
+}

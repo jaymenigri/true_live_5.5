@@ -1,0 +1,93 @@
+{
+  "domains": [
+    {
+      "domain": "idf.il",
+      "trust": "A",
+      "active": true,
+      "allow_paths": [
+        "/",
+        "/en/"
+      ]
+    },
+    {
+      "domain": "mfa.gov.il",
+      "trust": "A",
+      "active": true,
+      "allow_paths": [
+        "/"
+      ]
+    },
+    {
+      "domain": "gov.il",
+      "trust": "A",
+      "active": true,
+      "allow_paths": [
+        "/"
+      ]
+    },
+    {
+      "domain": "jewishvirtuallibrary.org",
+      "trust": "A",
+      "active": true,
+      "allow_paths": [
+        "/"
+      ]
+    },
+    {
+      "domain": "mdais.org",
+      "trust": "A",
+      "active": true,
+      "allow_paths": [
+        "/"
+      ]
+    },
+    {
+      "domain": "police.gov.il",
+      "trust": "A",
+      "active": true,
+      "allow_paths": [
+        "/"
+      ]
+    },
+    {
+      "domain": "inss.org.il",
+      "trust": "B",
+      "active": true,
+      "allow_paths": [
+        "/"
+      ]
+    },
+    {
+      "domain": "jcpa.org",
+      "trust": "B",
+      "active": true,
+      "allow_paths": [
+        "/"
+      ]
+    },
+    {
+      "domain": "jns.org",
+      "trust": "B",
+      "active": true,
+      "allow_paths": [
+        "/"
+      ]
+    },
+    {
+      "domain": "timesofisrael.com",
+      "trust": "B",
+      "active": true,
+      "allow_paths": [
+        "/"
+      ]
+    },
+    {
+      "domain": "jpost.com",
+      "trust": "B",
+      "active": true,
+      "allow_paths": [
+        "/"
+      ]
+    }
+  ]
+}

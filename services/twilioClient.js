@@ -1,18 +1,7 @@
 import Twilio from "twilio";
-
-const {
-  TWILIO_ACCOUNT_SID,
-  TWILIO_AUTH_TOKEN,
-  TWILIO_WHATSAPP_FROM
-} = process.env;
-
+const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM } = process.env;
 export const twilioClient = Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-
 export async function sendWhatsApp(to, body) {
   if (!to?.startsWith("whatsapp:")) to = "whatsapp:" + to.replace(/^whatsapp:/, "");
-  return twilioClient.messages.create({
-    from: TWILIO_WHATSAPP_FROM,
-    to,
-    body
-  });
+  return twilioClient.messages.create({ from: TWILIO_WHATSAPP_FROM, to, body });
 }
