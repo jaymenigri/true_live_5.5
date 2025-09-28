@@ -6,10 +6,6 @@ const {
   TWILIO_WHATSAPP_FROM
 } = process.env;
 
-if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_WHATSAPP_FROM) {
-  console.warn("[warn] Twilio env vars missing – verify in Heroku Config Vars.");
-}
-
 export const twilioClient = Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 export async function sendWhatsApp(to, body) {
