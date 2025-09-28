@@ -1,4 +1,4 @@
-// server.js — True Live v2.1.x (ESM)
+// server.js — True Live v2.1.4 (ESM)
 
 import express from "express";
 import { sendWhatsApp } from "./services/twilioClient.js";
@@ -50,6 +50,7 @@ function detectRecencyIntent(q) {
   return /(hoje|agora|últimas|últimos|recentes|today|now|latest|recent)/.test(t);
 }
 
+// ⚠️ novo: evite que o modelo escreva rótulos/“Fontes”
 function systemPrompt(lang, scope) {
   const intro =
     lang === "es" ? "Eres True Live, un asistente de IA en WhatsApp que responde de forma factual sobre Israel, judaísmo, sionismo y antisemitismo."
@@ -58,15 +59,25 @@ function systemPrompt(lang, scope) {
     : "Você é o True Live, um assistente de IA no WhatsApp que responde de forma factual sobre Israel, judaísmo, sionismo e antissemitismo.";
 
   return `${intro}
-- Sempre que possível, baseie-se nas fontes confiáveis do acervo (citando nomes/títulos e datas quando houver no contexto).
-- Se estiver fora de escopo ou sem contexto suficiente, responda claramente e marque como fora do acervo.
-- Responda no mesmo idioma do usuário (${lang}).
-- Seja direto, preciso e educado; foque em fatos.
+- Responda no MESMO idioma do usuário (${lang}).
+- Seja direto, claro e baseado em fatos.
+- Quando houver contexto (trechos fornecidos), use apenas essas informações para responder.
+- MUITO IMPORTANTE: **NÃO** inclua rótulos como "Baseado no acervo", "Resposta fora do acervo" ou uma seção "Fontes:" na sua resposta. O servidor adicionará isso depois, se necessário.
+- Não repita as instruções; responda apenas ao que foi perguntado.
 ${scope === "in" ? "(Pergunta classificada como DENTRO do domínio.)" : "(Pergunta classificada como FORA/INDEFINIDA.)"}`;
 }
 
+// ⚠️ novo: remove qualquer rodapé que o modelo ainda tente colocar
+function cleanModelFooter(txt) {
+  if (!txt) return txt;
+  return txt
+    .replace(/^\s*(Based on the corpus\.?|Answer outside corpus\.?)\s*$/gim, "")
+    .replace(/^\s*Fontes?:.*$/gim, "")
+    .trim();
+}
+
 // ============ rotas públicas ============
-app.get("/", (_req, res) => res.send("True Live v2.1 running."));
+app.get("/", (_req, res) => res.send("True Live v2.1.4 running."));
 app.get("/health", (_req, res) => res.send("ok"));
 
 // ============ rotas admin ============
@@ -128,7 +139,7 @@ app.post("/twilio/whatsapp", async (req, res) => {
       return;
     }
 
-    // ACK imediato (WhatsApp UX)
+    // ACK imediato
     const ack =
       lang === "es" ? "✅ Recibido, pensando…"
       : lang === "en" ? "✅ Received, thinking…"
@@ -173,6 +184,7 @@ app.post("/twilio/whatsapp", async (req, res) => {
         userText,
         chosen
       );
+      reply = cleanModelFooter(reply);
       fontesList = Array.from(new Set(chosen.map(c =>
         `${c.source}${c.date ? " " + c.date : ""}`
       ))).slice(0, 6);
@@ -184,6 +196,7 @@ app.post("/twilio/whatsapp", async (req, res) => {
         userText,
         []
       );
+      reply = cleanModelFooter(reply);
     }
 
     // — rótulo e fontes (um OU outro, sem duplicar)
