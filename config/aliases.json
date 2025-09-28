@@ -1,6 +1,142 @@
 {
   "itzhak rabim": "itzhak rabin",
   "yitzhak rabin": "itzhak rabin",
+  "yitshak rabin": "itzhak rabin",
+  "rabinovitz": "itzhak rabin",
+  "leah robin": "leah rabin",
+  "leah rabine": "leah rabin",
+
+  "ben gurion": "ben-gurion",
+  "david ben gurion": "ben-gurion",
+  "david bengurion": "ben-gurion",
+  "bengurion": "ben-gurion",
+  "paula munguez": "paula ben-gurion",
+  "paula munweis": "paula ben-gurion",
+
+  "golda meirson": "golda meir",
+  "golda meier": "golda meir",
+  "meier": "golda meir",
+
+  "shimon perez": "shimon peres",
+  "shimon peretz": "shimon peres",
+  "peretz": "shimon peres",
+
+  "menachem beguin": "menachem begin",
+  "menachen begin": "menachem begin",
+  "begin": "menachem begin",
+
+  "ariel sharom": "ariel sharon",
+  "ari sharon": "ariel sharon",
+
+  "yithzak shamir": "yitzhak shamir",
+  "yitzhak shamir": "yitzhak shamir",
+
+  "moshe dayan": "moshé dayan",
+  "moshe daian": "moshé dayan",
+  "moshé daian": "moshé dayan",
+
+  "chaim weizman": "chaim weizmann",
+  "weitzman": "chaim weizmann",
+
+  "theodor hertzl": "theodor herzl",
+  "t he rzl": "theodor herzl",
+
+  "shoah": "holocausto",
+  "shoá": "holocausto",
+  "holocosto": "holocausto",
+  "holocaust": "holocausto",
+
+  "nakbah": "nakba",
+  "catastrofe": "nakba",
+
+  "zionism": "sionismo",
+  "zionist": "sionista",
+  "zionists": "sionistas",
+  "antizionism": "antissionismo",
+  "anti-zionism": "antissionismo",
+
+  "antisemita": "antissemitismo",
+  "anti semita": "antissemitismo",
+  "antisemitico": "antissemitismo",
+  "antisemitism": "antissemitismo",
+
+  "jerusalem": "jerusalém",
+  "yerushalayim": "jerusalém",
+  "jerusalen": "jerusalém",
+  "hebron": "hevron",
+  "al-khalil": "hevron",
+  "cisjordania": "judeia e samaria",
+  "west bank": "judeia e samaria",
+  "judeia": "judéia",
+  "judia": "judéia",
+
+  "idf": "forças de defesa de israel",
+  "fdn": "forças de defesa de israel",
+  "israel defense forces": "forças de defesa de israel",
+  "forca de defesa de israel": "forças de defesa de israel",
+
+  "un": "onu",
+  "united nations": "onu",
+  "onu israel": "onu",
+
+  "ihra": "aliança internacional para a memória do holocausto",
+  "holocaust remembrance alliance": "aliança internacional para a memória do holocausto",
+
+  "pogrom": "pogroms",
+  "pogromes": "pogroms",
+
+  "diaspora": "diáspora",
+  "diasporah": "diáspora",
+
+  "hamas": "ḥamās",
+  "hamaz": "ḥamās",
+  "hamás": "ḥamās",
+  "fatah": "fatḥ",
+  "plo": "olp",
+  "p.l.o.": "olp",
+
+  "hezbollah": "hezbolá",
+  "hizbollah": "hezbolá",
+  "hisbollah": "hezbolá",
+  "hezbolla": "hezbolá",
+
+  "golan heights": "colinas de golã",
+  "golan": "colinas de golã",
+
+  "gaza strip": "faixa de gaza",
+  "gaza": "faixa de gaza",
+
+  "mandate for palestine": "mandato britânico",
+  "british mandate": "mandato britânico",
+
+  "law of return": "lei do retorno",
+  "return law": "lei do retorno",
+
+  "yom kippur war": "guerra do yom kipur",
+  "six-day war": "guerra dos seis dias",
+  "six day war": "guerra dos seis dias",
+
+  "camp david accords": "acordos de camp david",
+  "oslo accords": "acordos de oslo",
+
+  "yad vashem": "yad vashem / jvl",
+  "jewish virtual library": "jvl",
+  "jvl": "jvl",
+
+  "yahweh": "adonai",
+  "yahvé": "adonai",
+  "yahve": "adonai",
+  "jeová": "adonai",
+
+  "anti israel": "anti-israel",
+  "anti-israel": "anti-israel",
+
+  "ben gurion airport": "aeroporto ben-gurion",
+  "ben-gurion airport": "aeroporto ben-gurion"
+}
+{
+  "itzhak rabim": "itzhak rabin",
+  "yitzhak rabin": "itzhak rabin",
   "rabinovitz": "itzhak rabin",
   "ben gurion": "ben-gurion",
   "david ben gurion": "ben-gurion",
