@@ -37,7 +37,25 @@ function systemPrompt(lang, scope) {
 
 app.get("/", (_req, res) => res.send("True Live v2.1 running."));
 app.get("/admin/health", (req, res) => { const token=req.headers["x-admin-token"]||req.query.token; if (token!==ADMIN_TOKEN) return res.status(401).json({ok:false,error:"unauthorized"}); res.json({ ok:true, from: TWILIO_WHATSAPP_FROM||null, sessions: SESSIONS.size }); });
-app.post("/admin/ingest/run", async (req, res) => { const token=req.headers["x-admin-token"]||req.query.token; if (token!==ADMIN_TOKEN) return res.status(401).json({ok:false,error:"unauthorized"}); const mode=(req.query.mode||"rss,sitemap").split(","); const out={}; if(mode.includes("rss")) out.rss=await ingestRSS(); if(mode.includes("sitemap")) out.sitemap=await ingestSitemap(); res.json({ ok:true, result: out }); });
+
+// rota atual de ingestão (só POST)
+app.post("/admin/ingest/run", async (req, res) => {
+  try {
+    const token = req.headers["x-admin-token"] || req.query.token;
+    if (token !== process.env.ADMIN_TOKEN) {
+      return res.status(401).json({ ok: false, error: "unauthorized" });
+    }
+    const mode = (req.query.mode || "rss,sitemap").split(",").map(s => s.trim());
+    const out = {};
+    if (mode.includes("rss")) out.rss = await ingestRSS();
+    if (mode.includes("sitemap")) out.sitemap = await ingestSitemap();
+    return res.json({ ok: true, result: out });
+  } catch (e) {
+    console.error("ingest/run error:", e);
+    return res.status(500).json({ ok: false, error: "ingest-failed" });
+  }
+});
+
 
 app.post("/twilio/whatsapp", async (req, res) => {
   try {
