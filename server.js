@@ -15,32 +15,25 @@ const {
 } = process.env;
 
 function systemPrompt(lang, scope) {
--  // System prompt tuned to your policy
--  const base = `Você é o True Live, um assistente de IA no WhatsApp que responde de forma factual sobre Israel, judaísmo, sionismo e antissemitismo. 
-- Sempre que possível, baseie-se nas fontes confiáveis do acervo (citando nomes/títulos e datas quando houver no contexto).
+  const intro =
+    lang === "es"
+      ? "Eres True Live, un asistente de IA en WhatsApp que responde de forma factual sobre Israel, judaísmo, sionismo y antisemitismo."
+      : lang === "en"
+        ? "You are True Live, a WhatsApp AI assistant that answers factually about Israel, Judaism, Zionism, and antisemitism."
+        : lang === "he"
+          ? "אתה True Live, עוזר AI ב-WhatsApp העונה בצורה עובדתית על ישראל, יהדות, ציונות ואנטישמיות."
+          : "Você é o True Live, um assistente de IA no WhatsApp que responde de forma factual sobre Israel, judaísmo, sionismo e antissemitismo.";
+
+  const base = `${intro}
+- Sempre que possível (cuando sea posible / whenever possible), baseie-se nas fontes confiáveis do acervo (citando nomes/títulos e datas quando houver no contexto).
 - Se a pergunta estiver fora de escopo OU se não houver contexto suficiente, entregue a melhor resposta possível e deixe claro que não veio do acervo.
 - Responda no mesmo idioma do usuário (${lang}).
 - Seja direto, preciso e educado. Evite opiniões partidárias; foque em fatos.`;
--  return base + (scope === "in" ? "\n(Pergunta classificada como DENTRO do domínio.)" : "\n(Pergunta classificada como FORA/INDEFINIDA.)");
-+  // Agora multi-idioma automático
-+  const intro = lang === "es"
-+    ? "Eres True Live, un asistente de IA en WhatsApp que responde de forma factual sobre Israel, judaísmo, sionismo y antisemitismo."
-+    : lang === "en"
-+      ? "You are True Live, a WhatsApp AI assistant that answers factually about Israel, Judaism, Zionism and antisemitism."
-+      : lang === "he"
-+        ? "אתה True Live, עוזר AI ב-WhatsApp העונה בצורה עובדתית על ישראל, יהדות, ציונות ואנטישמיות."
-+        : "Você é o True Live, um assistente de IA no WhatsApp que responde de forma factual sobre Israel, judaísmo, sionismo e antissemitismo.";
-+
-+  const base = `${intro}
-+- Sempre que possível (cuando sea posible / whenever possible), baseie-se nas fontes confiáveis do acervo (citando nomes/títulos e datas quando houver no contexto).
-+- Se a pergunta estiver fora de escopo OU se não houver contexto suficiente, entregue a melhor resposta possível e deixe claro que não veio do acervo.
-+- Responda no mesmo idioma do usuário (${lang}).
-+- Seja direto, preciso e educado. Evite opiniões partidárias; foque em fatos.`;
-+  return base + (scope === "in"
-+    ? "\\n(Pergunta classificada como DENTRO do domínio.)"
-+    : "\\n(Pergunta classificada como FORA/INDEFINIDA.)");
-}
 
+  return base + (scope === "in"
+    ? "\n(Pergunta classificada como DENTRO do domínio.)"
+    : "\n(Pergunta classificada como FORA/INDEFINIDA.)");
+}
 
 // Health
 app.get("/", (req, res) => res.send("True Live – WhatsApp bot is running."));
@@ -52,17 +45,21 @@ app.get("/admin/health", (req, res) => {
   res.json({ ok:true, status:"healthy", from: process.env.TWILIO_WHATSAPP_FROM || null });
 });
 
-// Twilio WhatsApp webhook (set this URL in Twilio Console)
+// Twilio WhatsApp webhook
 app.post("/twilio/whatsapp", async (req, res) => {
   try {
-    const from = req.body.From;      // whatsapp:+<number>
+    const from = req.body.From;         // whatsapp:+<number>
     const body = (req.body.Body || "").trim();
     const lang = detectLang(body);
     const scope = classifyScope(body);
 
-    // ACK imediato via TwiML (mensagem curtinha)
-    const ack = lang === "es" ? "✅ Recibido, pensando…" : (lang === "en" ? "✅ Received, thinking…" :
-                (lang === "he" ? "✅ קיבלתי, חושב…" : "✅ Recebido, pensando…"));
+    // ACK imediato via TwiML
+    const ack =
+      lang === "es" ? "✅ Recibido, pensando…" :
+      lang === "en" ? "✅ Received, thinking…" :
+      lang === "he" ? "✅ קיבלתי, חושב…" :
+      "✅ Recebido, pensando…";
+
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response><Message>${ack}</Message></Response>`;
     res.set("Content-Type", "application/xml").status(200).send(twiml);
@@ -77,7 +74,7 @@ app.post("/twilio/whatsapp", async (req, res) => {
     }
   } catch (err) {
     console.error("Webhook error:", err);
-    // Twilio already got a 200/TwiML; log only.
+    // Twilio já recebeu 200/TwiML; só logamos.
   }
 });
 
@@ -85,13 +82,18 @@ app.post("/twilio/whatsapp", async (req, res) => {
 app.post("/admin/send", async (req, res) => {
   const token = req.headers["x-admin-token"];
   if (token !== ADMIN_TOKEN) return res.status(401).json({ ok:false, error:"unauthorized" });
-  const { to, body } = req.body;
+  const { to, body } = req.body || {};
   if (!to || !body) return res.status(400).json({ ok:false, error:"missing to/body" });
-  const r = await sendWhatsApp(to, body);
-  res.json({ ok:true, sid: r.sid });
+  try {
+    const r = await sendWhatsApp(to, body);
+    res.json({ ok:true, sid: r.sid });
+  } catch (e) {
+    console.error("Admin send error:", e);
+    res.status(500).json({ ok:false, error:"twilio send failed" });
+  }
 });
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log("True Live server listening on port", port);
+  console.log("True Live server listening on port", port, "from", TWILIO_WHATSAPP_FROM || "n/a");
 });
