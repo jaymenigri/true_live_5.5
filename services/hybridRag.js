@@ -4,7 +4,6 @@ import Parser from "rss-parser";
 import { XMLParser } from "fast-xml-parser";
 import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
-import pdfParse from "pdf-parse";
 import axios from "axios";
 import { embedText } from "./openaiClient.js";
 
@@ -17,7 +16,13 @@ const feedsPath = new URL("../config/feeds.json", import.meta.url);
 function loadJSON(p){ try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } }
 function* readDocs() { try { const lines = fs.readFileSync(docsStorePath, "utf8").split(/\n+/).filter(Boolean); for (const line of lines) yield JSON.parse(line); } catch {} }
 function writeDoc(doc){ fs.appendFileSync(docsStorePath, JSON.stringify(doc) + "\n"); }
-function buildLunr(docs){ return lunr(function(){ this.ref("id"); this.field("title"); this.field("text"); for (const d of docs) this.add({ id:d.id, title:d.title||"", text:d.text||"" }); }); }
+
+function buildLunr(docs){
+  return lunr(function(){
+    this.ref("id"); this.field("title"); this.field("text");
+    for (const d of docs) this.add({ id:d.id, title:d.title||"", text:d.text||"" });
+  });
+}
 function saveIndex(idx){ fs.writeFileSync(indexPath, JSON.stringify(idx)); }
 function tokenize(s){ return (s||"").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean); }
 
@@ -37,7 +42,10 @@ export async function retrieveHybrid(query, max=6, recencyIntent=false){
 
   let results = [];
   try {
-    results = idx.search(query).slice(0, 12).map(r => { const d = docs.find(x => x.id===r.ref) || null; return d ? { ...d, _scoreLex: r.score } : null; }).filter(Boolean);
+    results = idx.search(query).slice(0, 12).map(r => {
+      const d = docs.find(x => x.id===r.ref) || null;
+      return d ? { ...d, _scoreLex: r.score } : null;
+    }).filter(Boolean);
   } catch { results = []; }
 
   const terms = tokenize(query);
@@ -56,11 +64,27 @@ export async function retrieveHybrid(query, max=6, recencyIntent=false){
     }
   } else { for (const r of results) r._scoreSem = 0; }
 
-  function recencyBoost(dateStr){ if (!dateStr) return 1; const t = Date.parse(dateStr); if (isNaN(t)) return 1; const days = (Date.now()-t)/(1000*60*60*24); if (days<=30) return 1.25; if (days<=90) return 1.10; return 1.0; }
-  for (const r of results){ const base = (r._scoreLex||0) + (r._scoreSem||0)*2.0; r._score = base * (recencyIntent ? recencyBoost(r.date) : 1); }
+  function recencyBoost(dateStr){
+    if (!dateStr) return 1;
+    const t = Date.parse(dateStr); if (isNaN(t)) return 1;
+    const days = (Date.now()-t)/(1000*60*60*24);
+    if (days<=30) return 1.25;
+    if (days<=90) return 1.10;
+    return 1.0;
+  }
+  for (const r of results){
+    const base = (r._scoreLex||0) + (r._scoreSem||0)*2.0;
+    r._score = base * (recencyIntent ? recencyBoost(r.date) : 1);
+  }
 
   results.sort((a,b) => b._score - a._score);
-  const top = results.slice(0, max).map(r => ({ text: r.text?.slice(0,400) || "", source: r.domain ? r.domain : r.source || "", title: r.title || "", date: r.date || "", score: r._score }));
+  const top = results.slice(0, max).map(r => ({
+    text: r.text?.slice(0,400) || "",
+    source: r.domain ? r.domain : r.source || "",
+    title: r.title || "",
+    date: r.date || "",
+    score: r._score
+  }));
 
   const maxScore = top.length ? Math.max(...top.map(x => x.score)) : 1;
   const normalized = top.map(x => ({...x, norm: maxScore ? (x.score / maxScore) : 0 }));
@@ -68,52 +92,102 @@ export async function retrieveHybrid(query, max=6, recencyIntent=false){
   return { chunks: normalized, pass: ok.length > 0, chunksPassing: ok.slice(0, max) };
 }
 
-// ===== Ingestion =====
+/* ===== Ingestion ===== */
 function loadWhitelist(){ return loadJSON(whitelistPath) || { domains: [] }; }
 function inWhitelist(url, wl){
-  try { const u=new URL(url); const domain=u.hostname.replace(/^www\./,""); const rule=wl.domains.find(d=>domain.endsWith(d.domain)&&d.active); if(!rule) return null; const ok=rule.allow_paths?.some(p=>u.pathname.startsWith(p)) ?? true; return ok ? rule : null; } catch { return null; }
+  try {
+    const u = new URL(url);
+    const domain = u.hostname.replace(/^www\./,"");
+    const rule = wl.domains.find(d => domain.endsWith(d.domain) && d.active);
+    if (!rule) return null;
+    const ok = rule.allow_paths?.some(p => u.pathname.startsWith(p)) ?? true;
+    return ok ? rule : null;
+  } catch { return null; }
 }
-async function fetchHTML(url){ const { data } = await axios.get(url, { timeout: 15000 }); const dom=new JSDOM(data); const reader=new Readability(dom.window.document); const article=reader.parse(); return (article?.textContent || "").trim(); }
-async function fetchPDF(url){ const { data } = await axios.get(url, { responseType: "arraybuffer", timeout: 20000 }); const r = await pdfParse(Buffer.from(data)); return (r.text || "").trim(); }
+async function fetchHTML(url){
+  const { data } = await axios.get(url, { timeout: 15000 });
+  const dom = new JSDOM(data);
+  const reader = new Readability(dom.window.document);
+  const article = reader.parse();
+  return (article?.textContent || "").trim();
+}
+async function fetchPDF(url){
+  try {
+    const mod = await import("pdf-parse");        // ⬅ import dinâmico
+    const pdfParse = mod.default || mod;
+    const { data } = await axios.get(url, { responseType: "arraybuffer", timeout: 20000 });
+    const r = await pdfParse(Buffer.from(data));
+    return (r.text || "").trim();
+  } catch {
+    return ""; // nunca derrubar o servidor por causa de PDF
+  }
+}
 function isPDF(url){ return /\.pdf($|\?)/i.test(url); }
-function hasDoc(url){ try { const lines = fs.readFileSync(docsStorePath, "utf8").split(/\n+/).filter(Boolean); return lines.some(line => { try { return JSON.parse(line).url === url; } catch { return false; } }); } catch { return false; } }
+function hasDoc(url){
+  try {
+    const lines = fs.readFileSync(docsStorePath, "utf8").split(/\n+/).filter(Boolean);
+    return lines.some(line => { try { return JSON.parse(line).url === url; } catch { return false; } });
+  } catch { return false; }
+}
 
 export async function ingestRSS(){
-  const wl = loadWhitelist(); const parser = new Parser(); const feeds = (loadJSON(feedsPath)?.rss) || []; let added = 0;
+  const wl = loadWhitelist(); const parser = new Parser();
+  const feeds = (loadJSON(feedsPath)?.rss) || [];
+  let added = 0;
   for (const f of feeds){
-    try { const r = await parser.parseURL(f);
+    try {
+      const r = await parser.parseURL(f);
       for (const it of (r.items || [])){
         const link = it.link || it.guid; if (!link) continue;
         const rule = inWhitelist(link, wl); if (!rule) continue;
         if (hasDoc(link)) continue;
-        let text = ""; try { text = isPDF(link) ? await fetchPDF(link) : await fetchHTML(link); } catch {}
+        let text = "";
+        try { text = isPDF(link) ? await fetchPDF(link) : await fetchHTML(link); } catch {}
         if (!text || text.split(/\s+/).length < 80) continue;
         let embedding = null; try { embedding = await embedText(text); } catch {}
-        const doc = { id: `rss-${Date.now()}-${Math.random().toString(36).slice(2,8)}`, url: link, title: it.title || "", text, date: it.isoDate || it.pubDate || "", domain: new URL(link).hostname.replace(/^www\./,""), trust: rule.trust, embedding };
+        const doc = {
+          id: `rss-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
+          url: link, title: it.title || "", text,
+          date: it.isoDate || it.pubDate || "", domain: new URL(link).hostname.replace(/^www\./,""),
+          trust: rule.trust, embedding
+        };
         writeDoc(doc); added++;
       }
     } catch {}
   }
-  const docs = Array.from(readDocs()); const idx = buildLunr(docs); saveIndex(idx);
+  const docs = Array.from(readDocs());
+  const idx = buildLunr(docs);
+  saveIndex(idx);
   return { added, total: docs.length };
 }
 
 export async function ingestSitemap(){
-  const wl = loadWhitelist(); const sitemaps = (loadJSON(feedsPath)?.sitemaps) || []; const parser = new XMLParser(); let added = 0;
+  const wl = loadWhitelist(); const sitemaps = (loadJSON(feedsPath)?.sitemaps) || [];
+  const parser = new XMLParser();
+  let added = 0;
   for (const sm of sitemaps){
-    try { const { data } = await axios.get(sm, { timeout: 15000 });
-      const xml = parser.parse(data); const urls = (xml.urlset?.url || []).map(u => u.loc).filter(Boolean);
+    try {
+      const { data } = await axios.get(sm, { timeout: 15000 });
+      const xml = parser.parse(data);
+      const urls = (xml.urlset?.url || []).map(u => u.loc).filter(Boolean);
       for (const link of urls){
         const rule = inWhitelist(link, wl); if (!rule) continue;
         if (hasDoc(link)) continue;
-        let text = ""; try { text = isPDF(link) ? await fetchPDF(link) : await fetchHTML(link); } catch {}
+        let text = "";
+        try { text = isPDF(link) ? await fetchPDF(link) : await fetchHTML(link); } catch {}
         if (!text || text.split(/\s+/).length < 80) continue;
         let embedding = null; try { embedding = await embedText(text); } catch {}
-        const doc = { id: `sm-${Date.now()}-${Math.random().toString(36).slice(2,8)}`, url: link, title: "", text, date: "", domain: new URL(link).hostname.replace(/^www\./,""), trust: rule.trust, embedding };
+        const doc = {
+          id: `sm-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
+          url: link, title: "", text, date: "", domain: new URL(link).hostname.replace(/^www\./,""),
+          trust: rule.trust, embedding
+        };
         writeDoc(doc); added++;
       }
     } catch {}
   }
-  const docs = Array.from(readDocs()); const idx = buildLunr(docs); saveIndex(idx);
+  const docs = Array.from(readDocs());
+  const idx = buildLunr(docs);
+  saveIndex(idx);
   return { added, total: docs.length };
 }
