@@ -12,19 +12,20 @@ const docsStorePath = new URL("../data/docs.jsonl", import.meta.url);
 const indexPath = new URL("../data/index.json", import.meta.url);
 const whitelistPath = new URL("../config/whitelist.json", import.meta.url);
 const feedsPath = new URL("../config/feeds.json", import.meta.url);
+const aliasesPath = new URL("../config/aliases.json", import.meta.url);
 
 function loadJSON(p){ try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } }
 function* readDocs() { try { const lines = fs.readFileSync(docsStorePath, "utf8").split(/\n+/).filter(Boolean); for (const line of lines) yield JSON.parse(line); } catch {} }
 function writeDoc(doc){ fs.appendFileSync(docsStorePath, JSON.stringify(doc) + "\n"); }
-
-function buildLunr(docs){
-  return lunr(function(){
-    this.ref("id"); this.field("title"); this.field("text");
-    for (const d of docs) this.add({ id:d.id, title:d.title||"", text:d.text||"" });
-  });
-}
+function buildLunr(docs){ return lunr(function(){ this.ref("id"); this.field("title"); this.field("text"); for (const d of docs) this.add({ id:d.id, title:d.title||"", text:d.text||"" }); }); }
 function saveIndex(idx){ fs.writeFileSync(indexPath, JSON.stringify(idx)); }
 function tokenize(s){ return (s||"").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean); }
+
+const ALIASES = loadJSON(aliasesPath) || {};
+function normalizeQuery(q){
+  const k = (q||"").toLowerCase().trim();
+  return ALIASES[k] || q;
+}
 
 export function classifyScope(text){
   const t = (text||"").toLowerCase();
@@ -34,50 +35,81 @@ export function classifyScope(text){
 
 function cosine(a,b){ let dot=0,na=0,nb=0; for (let i=0;i<Math.min(a.length,b.length);i++){ dot+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; } return dot/(Math.sqrt(na)*Math.sqrt(nb)+1e-9); }
 
+/* ===== cache de embeddings do corpus curado ===== */
+const CORPUS = loadJSON(corpusPath) || [];
+let CORPUS_EMB = null;
+async function ensureCorpusEmbeddings(){
+  if (CORPUS_EMB) return;
+  CORPUS_EMB = [];
+  for (const c of CORPUS){
+    try {
+      const emb = await embedText(c.text || c.title || "");
+      CORPUS_EMB.push({ id:c.id, emb, item:c });
+    } catch {
+      CORPUS_EMB.push({ id:c.id, emb:null, item:c });
+    }
+  }
+}
+
+/* ===== Recuperação híbrida (BM25 + semântico) ===== */
 export async function retrieveHybrid(query, max=6, recencyIntent=false){
-  const CORPUS = loadJSON(corpusPath) || [];
+  const q = normalizeQuery(query);
+  await ensureCorpusEmbeddings();
+
+  // BM25 (Lunr) em documentos ingeridos
   const docs = Array.from(readDocs());
   let idx; try { idx = lunr.Index.load(loadJSON(indexPath)); } catch {}
   if (!idx){ idx = buildLunr(docs); saveIndex(idx); }
 
   let results = [];
   try {
-    results = idx.search(query).slice(0, 12).map(r => {
+    results = idx.search(q).slice(0, 12).map(r => {
       const d = docs.find(x => x.id===r.ref) || null;
       return d ? { ...d, _scoreLex: r.score } : null;
     }).filter(Boolean);
   } catch { results = []; }
 
-  const terms = tokenize(query);
-  const corpusHits = CORPUS.map(c => {
+  // Recall lexical simples no corpus curado (barato)
+  const terms = tokenize(q);
+  const corpusLex = CORPUS.map(c => {
     const hay = (c.title + " " + c.text).toLowerCase();
     let s = 0; for (const w of terms) if (hay.includes(w)) s += 1;
     return { ...c, _scoreLex: s * 0.8, domain: "corpus", trust: "A" };
-  }).filter(c => c._scoreLex > 0).slice(0,6);
-  results = results.concat(corpusHits);
+  }).filter(c => c._scoreLex > 0);
 
-  let qEmb = null; try { qEmb = await embedText(query); } catch {}
-  if (qEmb){
-    for (const r of results){
-      if (!r.embedding && r.text){ try { r.embedding = await embedText(r.text); } catch {} }
-      r._scoreSem = r.embedding ? cosine(qEmb, r.embedding) : 0;
-    }
-  } else { for (const r of results) r._scoreSem = 0; }
+  // Recall semântico direto no corpus curado (tolerante a erro de grafia)
+  let qEmb = null; try { qEmb = await embedText(q); } catch {}
+  let corpusSem = [];
+  if (qEmb && CORPUS_EMB?.length){
+    corpusSem = CORPUS_EMB
+      .map(row => ({ item: row.item, _scoreSem: row.emb ? cosine(qEmb, row.emb) : 0 }))
+      .sort((a,b)=>b._scoreSem - a._scoreSem)
+      .slice(0, 8) // top-N
+      .map(r => ({ ...r.item, domain: "corpus", trust: "A", _scoreSem: r._scoreSem }));
+  }
 
+  // Junta candidatos
+  results = results.concat(corpusLex).concat(corpusSem);
+
+  // Se ainda não temos embedding da query (falhou), zera semântico
+  if (!qEmb){ for (const r of results) r._scoreSem = 0; }
+
+  // Reranking + boost de recência
   function recencyBoost(dateStr){
     if (!dateStr) return 1;
     const t = Date.parse(dateStr); if (isNaN(t)) return 1;
-    const days = (Date.now()-t)/(1000*60*60*24);
-    if (days<=30) return 1.25;
-    if (days<=90) return 1.10;
+    const days = (Date.now() - t)/(1000*60*60*24);
+    if (days <= 30) return 1.25;
+    if (days <= 90) return 1.10;
     return 1.0;
   }
   for (const r of results){
-    const base = (r._scoreLex||0) + (r._scoreSem||0)*2.0;
+    const base = (r._scoreLex || 0) + (r._scoreSem || 0)*2.0;
     r._score = base * (recencyIntent ? recencyBoost(r.date) : 1);
   }
 
-  results.sort((a,b) => b._score - a._score);
+  // Ordena e aplica limiar 0,5 (normalizado)
+  results.sort((a,b)=>b._score - a._score);
   const top = results.slice(0, max).map(r => ({
     text: r.text?.slice(0,400) || "",
     source: r.domain ? r.domain : r.source || "",
@@ -92,7 +124,7 @@ export async function retrieveHybrid(query, max=6, recencyIntent=false){
   return { chunks: normalized, pass: ok.length > 0, chunksPassing: ok.slice(0, max) };
 }
 
-/* ===== Ingestion ===== */
+/* ===== Ingestão (sem mudanças relevantes) ===== */
 function loadWhitelist(){ return loadJSON(whitelistPath) || { domains: [] }; }
 function inWhitelist(url, wl){
   try {
@@ -100,8 +132,8 @@ function inWhitelist(url, wl){
     const domain = u.hostname.replace(/^www\./,"");
     const rule = wl.domains.find(d => domain.endsWith(d.domain) && d.active);
     if (!rule) return null;
-    const ok = rule.allow_paths?.some(p => u.pathname.startsWith(p)) ?? true;
-    return ok ? rule : null;
+    const okPath = rule.allow_paths?.some(p => u.pathname.startsWith(p)) ?? true;
+    return okPath ? rule : null;
   } catch { return null; }
 }
 async function fetchHTML(url){
@@ -113,13 +145,13 @@ async function fetchHTML(url){
 }
 async function fetchPDF(url){
   try {
-    const mod = await import("pdf-parse");        // ⬅ import dinâmico
+    const mod = await import("pdf-parse"); // import dinâmico
     const pdfParse = mod.default || mod;
     const { data } = await axios.get(url, { responseType: "arraybuffer", timeout: 20000 });
     const r = await pdfParse(Buffer.from(data));
     return (r.text || "").trim();
   } catch {
-    return ""; // nunca derrubar o servidor por causa de PDF
+    return "";
   }
 }
 function isPDF(url){ return /\.pdf($|\?)/i.test(url); }
