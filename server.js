@@ -18,7 +18,7 @@ const {
 } = process.env;
 
 /* ===== Memória e limites ===== */
-const SESSIONS = new Map(); // key: whatsapp:+<number> ; value: { msgs: [...], last: epoch_ms, countDay: {day, count} }
+const SESSIONS = new Map();
 function now() { return Date.now(); }
 function yyyymmdd() { const d = new Date(); return d.toISOString().slice(0,10); }
 function pruneOldSessions() {
@@ -32,7 +32,7 @@ function getHistory(key) {
 }
 function pushHistory(key, role, content) {
   const s = SESSIONS.get(key) || { msgs: [], last: 0, countDay: { day: yyyymmdd(), count: 0 } };
-  const arr = s.msgs.concat([{ role, content }]).slice(-10); // 5 turns
+  const arr = s.msgs.concat([{ role, content }]).slice(-10);
   s.msgs = arr; s.last = now();
   SESSIONS.set(key, s);
 }
@@ -65,34 +65,26 @@ function systemPrompt(lang, scope) {
   return base + (scope === "in" ? "\n(Pergunta classificada como DENTRO do domínio.)" : "\n(Pergunta classificada como FORA/INDEFINIDA.)");
 }
 
-// Health
 app.get("/", (req, res) => res.send("True Live – WhatsApp bot is running."));
 app.get("/admin/health", (req, res) => {
   const token = req.headers["x-admin-token"] || req.query.token;
   if (token !== ADMIN_TOKEN) return res.status(401).json({ ok:false, error:"unauthorized" });
-  res.json({
-    ok:true,
-    status:"healthy",
-    from: TWILIO_WHATSAPP_FROM || null,
-    sessions: SESSIONS.size
-  });
+  res.json({ ok:true, status:"healthy", from: TWILIO_WHATSAPP_FROM || null, sessions: SESSIONS.size });
 });
 app.get("/admin/sources", (req, res) => {
   const token = req.headers["x-admin-token"] || req.query.token;
   if (token !== ADMIN_TOKEN) return res.status(401).json({ ok:false, error:"unauthorized" });
-  res.json({ ok:true, count: listFontes().length, fontes: listFontes() });
+  res.json({ ok:true, fontes: listFontes() });
 });
 
-// Twilio WhatsApp webhook
 app.post("/twilio/whatsapp", async (req, res) => {
   try {
-    const from = (req.body.From || "").trim();         // whatsapp:+<number>
+    const from = (req.body.From || "").trim();
     const body = (req.body.Body || "").trim();
     const numMedia = Number(req.body.NumMedia || 0);
     const lang = detectLang(body);
     const scope = classifyScope(body);
 
-    // Rate limit per user
     const used = incCount(from);
     if (used > DAILY_CAP) {
       const msg =
@@ -105,41 +97,33 @@ app.post("/twilio/whatsapp", async (req, res) => {
       return;
     }
 
-    // ACK imediato
     const ack =
       lang === "es" ? "✅ Recibido, pensando…" :
       lang === "en" ? "✅ Received, thinking…" :
       lang === "he" ? "✅ קיבלתי, חושב…" :
       "✅ Recebido, pensando…";
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response><Message>${ack}</Message></Response>`;
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${ack}</Message></Response>`;
     res.set("Content-Type", "application/xml").status(200).send(twiml);
 
-    // Se vier áudio, tentar transcrever
     let userText = body;
     if (numMedia > 0 && req.body.MediaUrl0) {
       try {
         const buf = await fetchTwilioMedia(req.body.MediaUrl0, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
         const txt = await transcribeAudio(buf, "audio.ogg");
         if (txt) userText = txt;
-      } catch (e) {
-        console.error("Audio transcription failed:", e?.message);
-      }
+      } catch (e) { console.error("Audio transcription failed:", e?.message); }
     }
 
-    // RAG catálogo
     let ctxChunks = [];
     let basedOnCorpus = false;
     if (scope === "in") {
       const { chunks, ratio } = retrieveContext(userText, 6);
       ctxChunks = chunks;
-      basedOnCorpus = ratio >= 0.5; // limiar
+      basedOnCorpus = ratio >= 0.5;
     }
 
-    // History
     const hist = getHistory(from);
 
-    // Compose final response
     const finalText = await generateResponseWithHistory(
       systemPrompt(lang, scope),
       hist,
@@ -147,34 +131,25 @@ app.post("/twilio/whatsapp", async (req, res) => {
       ctxChunks
     );
 
-    // Append fontes list / label
     const fontesList = Array.from(new Set((ctxChunks || []).map(c => c.source))).slice(0,6);
     const label =
       basedOnCorpus
         ? (lang === "es" ? "Basado en el acervo." : (lang === "en" ? "Based on the corpus." : (lang === "he" ? "מבוסס מאגר." : "Baseado no acervo.")))
         : (lang === "es" ? "Respuesta fuera del acervo." : (lang === "en" ? "Answer outside corpus." : (lang === "he" ? "תשובה מחוץ למאגר." : "Resposta fora do acervo.")));
 
-    const fontesBlock = fontesList.length
-      ? "\n\nFontes: " + fontesList.join(" | ")
-      : "";
-
+    const fontesBlock = fontesList.length ? "\n\nFontes: " + fontesList.join(" | ") : "";
     const toSend = finalText + "\n\n" + label + fontesBlock;
 
-    // Save history and send
     pushHistory(from, "user", userText);
     pushHistory(from, "assistant", toSend);
 
-    const chunks = chunkMessage(toSend, 1500);
-    for (const part of chunks) {
-      await sendWhatsApp(from, part);
-    }
+    const chunksOut = chunkMessage(toSend, 1500);
+    for (const part of chunksOut) await sendWhatsApp(from, part);
   } catch (err) {
     console.error("Webhook error:", err);
-    // Twilio already got 200/TwiML
   }
 });
 
-// Admin manual send
 app.post("/admin/send", async (req, res) => {
   const token = req.headers["x-admin-token"] || req.query.token;
   if (token !== ADMIN_TOKEN) return res.status(401).json({ ok:false, error:"unauthorized" });

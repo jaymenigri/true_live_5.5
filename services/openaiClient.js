@@ -21,9 +21,7 @@ Contexto extraído do acervo (máx 6 trechos curtos). Use fielmente e cite as fo
 ${(contextChunks || []).map((c, i) => `(${i+1}) ${c.text} [Fonte: ${c.source}]`).join("\n")}`.trim();
 
   const messages = [{ role: "system", content: sys }];
-  for (const m of (history || [])) {
-    messages.push({ role: m.role, content: m.content });
-  }
+  for (const m of (history || [])) messages.push({ role: m.role, content: m.content });
   messages.push({ role: "user", content: user });
 
   const completion = await client.chat.completions.create({
