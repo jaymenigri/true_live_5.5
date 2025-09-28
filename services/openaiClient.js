@@ -1,16 +1,33 @@
 import OpenAI from "openai";
+import fs from "fs";
+import path from "path";
+
 const { OPENAI_API_KEY, OPENAI_MODEL, OPENAI_TIMEOUT_MS } = process.env;
 const client = new OpenAI({ apiKey: OPENAI_API_KEY, timeout: Number(OPENAI_TIMEOUT_MS || 8000) });
 
-export async function transcribeAudio(buffer, filename = "audio.ogg") {
-  const blob = new Blob([buffer], { type: "audio/ogg" });
-  const file = new File([blob], filename);
-  const r = await client.audio.transcriptions.create({
-    file,
-    model: "whisper-1",
-    response_format: "verbose_json"
-  });
-  return r?.text || "";
+/** Salva o buffer em /tmp e envia como stream para o Whisper. */
+export async function transcribeAudio(buffer, { basename = "audio", contentType = "audio/ogg" } = {}) {
+  // escolhe extensão pela content-type
+  const ext = contentType.includes("mpeg") || contentType.includes("mp3") ? ".mp3"
+           : contentType.includes("mp4")  || contentType.includes("mp4a") || contentType.includes("m4a") ? ".m4a"
+           : contentType.includes("wav")  ? ".wav"
+           : contentType.includes("webm") ? ".webm"
+           : ".ogg";
+  const tmpPath = path.join("/tmp", `${basename}-${Date.now()}${ext}`);
+  fs.writeFileSync(tmpPath, buffer);
+
+  try {
+    const fileStream = fs.createReadStream(tmpPath);
+    const r = await client.audio.transcriptions.create({
+      file: fileStream,
+      model: "whisper-1",
+      response_format: "verbose_json"
+    });
+    return r?.text?.trim() || "";
+  } finally {
+    // limpeza best-effort
+    try { fs.unlinkSync(tmpPath); } catch {}
+  }
 }
 
 export async function generateResponseWithHistory(system, history, user, contextChunks) {
