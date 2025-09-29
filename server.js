@@ -1,64 +1,69 @@
-// server.js — True Live v2.3.1 (fix: fallback sempre que fora de escopo)
-// ESM (type: module no package.json)
+// server.js — True Live v2.3.2
+// Correções: TwiML no ACK + envio ativo via Twilio Messages API + logs
 
 import express from "express";
 import fetch from "node-fetch";
-import crypto from "crypto";
 
-// ===== serviços RAG =====
+// === Serviços internos ===
 import {
-  classifyScope,          // "in" | "maybe" | "out"
-  retrieveHybrid,         // (query, k, preferRecent) -> { pass, chunksPassing, chunks }
-  ingestRSS, ingestSitemap
+  classifyScope,
+  retrieveHybrid,
+  ingestRSS,
+  ingestSitemap
 } from "./services/hybridRag.js";
 
-// ===== OpenAI client mínimo (chat) =====
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPENAI_APIKEY || "";
-const OPENAI_MODEL   = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const OPENAI_TIMEOUT = Number(process.env.OPENAI_TIMEOUT_MS || "10000");
+// === ENV ===
+const {
+  ADMIN_TOKEN = "truelive2025",
+  OPENAI_API_KEY,
+  OPENAI_MODEL = "gpt-4o-mini",
+  OPENAI_TIMEOUT_MS = "10000",
+  TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN,
+  TWILIO_WHATSAPP_FROM, // ex.: "whatsapp:+18706068686"
+  RAG_THRESHOLD = "0.4",
+  ANSWER_OUTSIDE_CORPUS_FIRST_N = "0",
+  OFFTOPIC_MAX = "3",
+  OFFTOPIC_COOLDOWN_MIN = "15"
+} = process.env;
 
-// ===== Twilio =====
-const TWILIO_WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || ""; // "whatsapp:+18706068686"
+const OPENAI_TIMEOUT = Number(OPENAI_TIMEOUT_MS);
 
-// ===== Admin =====
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "truelive2025";
-
-// ===== RAG threshold =====
-const RAG_THRESHOLD = Number(process.env.RAG_THRESHOLD || "0.4");
-
-// ===== Off-topic / Fallback tuning =====
-const ANSWER_OUTSIDE_CORPUS_FIRST_N = Number(process.env.ANSWER_OUTSIDE_CORPUS_FIRST_N || "0"); // 0 = nunca suprimir
-const OFFTOPIC_MAX = Number(process.env.OFFTOPIC_MAX || "3");
-const OFFTOPIC_COOLDOWN_MIN = Number(process.env.OFFTOPIC_COOLDOWN_MIN || "15");
-
-// ===== memória curtíssima na RAM (24h seria banco; aqui só mapa simples) =====
-const sessions = new Map(); // key: from -> { history:[...], subject:string, off:{count, until:number} }
+// === Memória de sessão (leve) ===
+const sessions = new Map(); // from -> { history:[], subject:"", off:{count, until} }
 function getSession(from) {
   if (!sessions.has(from)) sessions.set(from, { history: [], subject: "", off: { count: 0, until: 0 } });
   return sessions.get(from);
 }
-function setSubject(from, title = "") {
-  const s = getSession(from);
-  if (title) s.subject = title;
-}
-function getSubject(from) {
-  return getSession(from).subject || "";
-}
-function nowSec() { return Math.floor(Date.now() / 1000); }
+function setSubject(from, title) { const s = getSession(from); if (title) s.subject = title; }
+function getSubject(from) { return getSession(from).subject || ""; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
 
-// ===== Express =====
+// === App ===
 const app = express();
+// Twilio manda application/x-www-form-urlencoded
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ---------- util ----------
-function detectLang(text = "") {
-  const t = (text || "").toLowerCase();
-  if (/[áéíóúãõç]/.test(t) || t.includes("que ")) return "pt";
+// === Utils ===
+function detectLang(text=""){
+  const t=(text||"").toLowerCase();
+  if (/[áéíóúãõç]/.test(t) || t.includes(" que ")) return "pt";
   if (/[¿¡]/.test(t)) return "es";
   return "en";
 }
-function shortOutsidePreface(lang) {
+function detectRecencyIntent(text=""){
+  const t=(text||"").toLowerCase();
+  return /hoje|agora|últim|ultim|recent|breaking|agora mesmo/.test(t);
+}
+function isPronominal(text=""){
+  return /^(quem|qual|quais|onde|quando|como|ele|ela|dele|dela|seu|sua)\b/i.test(text.trim());
+}
+function expandIfPronominal(text="", subject=""){
+  if (!isPronominal(text) || !subject) return text;
+  return `${text} (referindo-se a ${subject})`;
+}
+function shortOutsidePreface(lang){
   const m = {
     pt: "Esta pergunta está fora do acervo. Ainda assim, segue uma resposta geral:",
     en: "This is outside the curated corpus. Still, here is a general answer:",
@@ -66,7 +71,7 @@ function shortOutsidePreface(lang) {
   };
   return m[lang] || m.pt;
 }
-function markAsOutsideCorpus(q, lang) {
+function markAsOutsideCorpus(q, lang){
   const instr = {
     pt: "Responda clara e diretamente. Não invente fontes. Seja conciso e útil.",
     en: "Answer clearly and directly. Do not fabricate sources. Be concise and helpful.",
@@ -74,34 +79,22 @@ function markAsOutsideCorpus(q, lang) {
   };
   return `${instr[lang] || instr.pt}\n\nPergunta: ${q}`;
 }
-function withBadges(text, { basedOnCorpus, sources } = {}) {
+function withBadges(text, { basedOnCorpus, sources } = {}){
   const lines = [];
   if (basedOnCorpus) {
     lines.push("Based on the corpus.");
-    const names = (sources || []).map(s => s.title || s.source || "corpus").slice(0, 6);
+    const names = (sources || []).map(s => s.title || s.source || "corpus").slice(0,6);
     if (names.length) lines.push(`Fontes: ${names.join(" | ")}`);
   } else {
     lines.push("Resposta fora do acervo.");
   }
   return `${text}\n\n${lines.join("\n")}`;
 }
-function detectRecencyIntent(text = "") {
-  const t = (text || "").toLowerCase();
-  return /hoje|agora|última|ultimas|últimas|ultimos|últimos|recent|breaking|agora mesmo/.test(t);
-}
-function isPronominal(text = "") {
-  return /^(quem|qual|quais|onde|quando|como|ele|ela|dele|dela|seu|sua)\b/i.test(text.trim());
-}
-function expandIfPronominal(text = "", subject = "") {
-  if (!isPronominal(text) || !subject) return text;
-  // Ex.: "Qual o nome da esposa dele?" -> "Qual o nome da esposa de David Ben-Gurion?"
-  return `${text} (referindo-se a ${subject})`;
-}
 
-// ---------- OpenAI ----------
-async function openaiChat(messages) {
+// === OpenAI chat mínimo ===
+async function openaiChat(messages, lang="pt"){
   const controller = new AbortController();
-  const to = setTimeout(() => controller.abort(), OPENAI_TIMEOUT);
+  const to = setTimeout(()=>controller.abort(), OPENAI_TIMEOUT);
   try {
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -109,201 +102,174 @@ async function openaiChat(messages) {
         "authorization": `Bearer ${OPENAI_API_KEY}`,
         "content-type": "application/json"
       },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        messages,
-        temperature: 0.2
-      }),
+      body: JSON.stringify({ model: OPENAI_MODEL, messages, temperature: 0.2 }),
       signal: controller.signal
     });
     const json = await res.json();
     const out = json?.choices?.[0]?.message?.content?.trim() || "";
-    return out || "(no content)";
+    return out || (lang==="pt" ? "Desculpe, não consegui gerar a resposta." : lang==="es" ? "Perdón, no pude generar la respuesta." : "Sorry, I couldn’t generate the answer.");
+  } catch (e) {
+    console.error("OpenAI error", e?.message || e);
+    return (lang==="pt" ? "Desculpe, tive um problema técnico." : lang==="es" ? "Perdón, tuve un problema técnico." : "Sorry, I had a technical issue.");
   } finally {
     clearTimeout(to);
   }
 }
-async function generateResponseWithHistory(userId, userPrompt, lang) {
+async function generateResponseWithHistory(userId, userPrompt, lang){
   const s = getSession(userId);
-  const system = {
-    role: "system",
-    content:
-      lang === "pt"
-        ? "Você é um assistente claro, conciso e factual. Se o rodapé disser 'Based on the corpus.' ou 'Resposta fora do acervo.', NÃO repita isso; o servidor adiciona o rodapé. Não invente fontes."
-        : lang === "es"
-        ? "Eres un asistente claro, conciso y factual. Si el pie de página dice 'Based on the corpus.' o 'Respuesta fuera del acervo.', NO lo repitas; el servidor lo añade. No inventes fuentes."
-        : "You are a clear, concise, factual assistant. If a footer like 'Based on the corpus.' or 'Resposta fora do acervo.' is appended by the server, do NOT repeat it. Do not invent sources."
-  };
-  const msgs = [system];
-  // Historico curto (últimas 8)
-  const hist = s.history.slice(-8);
-  msgs.push(...hist);
-  msgs.push({ role: "user", content: userPrompt });
-  const reply = await openaiChat(msgs);
-  // salva
-  s.history.push({ role: "user", content: userPrompt });
-  s.history.push({ role: "assistant", content: reply });
+  const system =
+    lang==="pt" ? "Você é um assistente claro, conciso e factual. Não adicione rodapés; o servidor cuida disso."
+    : lang==="es" ? "Eres un asistente claro, conciso y factual. No agregues pies de página; el servidor se encarga."
+    : "You are a clear, concise, factual assistant. Do not add footers; the server will handle them.";
+  const msgs = [{ role:"system", content: system }, ...s.history.slice(-8), { role:"user", content: userPrompt }];
+  const reply = await openaiChat(msgs, lang);
+  s.history.push({ role:"user", content: userPrompt });
+  s.history.push({ role:"assistant", content: reply });
   return reply;
 }
 
-// ---------- Core de processamento ----------
-async function handleIncomingText({ from, body }) {
+// === Twilio: envio ativo via API ===
+async function sendWhatsApp(to, body){
+  try {
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_WHATSAPP_FROM) {
+      console.error("Twilio ENV missing; cannot send message.");
+      return;
+    }
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+    const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+    const form = new URLSearchParams({
+      From: TWILIO_WHATSAPP_FROM,
+      To: to,
+      Body: body
+    });
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${auth}`,
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: form
+    });
+    const txt = await res.text();
+    if (!res.ok) console.error("Twilio send error:", res.status, txt.slice(0,300));
+  } catch (e) {
+    console.error("sendWhatsApp error", e?.message || e);
+  }
+}
+
+// === Core de processamento ===
+async function handleIncomingText({ from, body }){
   const userText = (body || "").trim();
   const lang = detectLang(userText);
 
-  // cooldown off-topic?
-  const session = getSession(from);
-  if (session.off.until > nowSec()) {
-    const mins = Math.max(1, Math.ceil((session.off.until - nowSec()) / 60));
-    const msg =
-      lang === "pt"
-        ? `Voltamos em breve. Pausa de ${mins} min por muitas mensagens fora do tema.`
-        : lang === "es"
-        ? `Volvemos pronto. Pausa de ${mins} min por muchos mensajes fuera del tema.`
-        : `We'll be back soon. Cooldown ${mins} min due to off-topic messages.`;
-    return msg;
+  // cooldown simples
+  const s = getSession(from);
+  if (s.off.until > nowSec()) {
+    const mins = Math.max(1, Math.ceil((s.off.until - nowSec())/60));
+    return lang==="pt" ? `Voltamos em breve. Pausa de ${mins} min por muitas mensagens fora do tema.`
+         : lang==="es" ? `Volvemos pronto. Pausa de ${mins} min por muchos mensajes fuera del tema.`
+         : `We'll be back soon. Cooldown ${mins} min due to off-topic messages.`;
   }
 
-  // 1) escopo
   const scope = classifyScope(userText); // "in" | "maybe" | "out"
-
-  // 2) recência e sujeito
   const preferRecent = detectRecencyIntent(userText);
   const subjectHint = getSubject(from);
   const effectiveQuery = expandIfPronominal(userText, subjectHint);
+
+  console.log(`[IN] from=${from} text="${userText}" scope=${scope} recent=${preferRecent}`);
   console.log("Effective query:", effectiveQuery);
 
-  // 3) Regras
+  // Dentro ou maybe → tenta RAG primeiro
   if (scope === "in" || scope === "maybe") {
-    // tentar RAG
     const rag = await retrieveHybrid(effectiveQuery, 6, preferRecent);
     if (rag?.pass && rag?.chunksPassing?.length) {
-      // compor prompt “apoiado” nos trechos
       const context = rag.chunksPassing
         .map(c => `• ${c.text} [${c.title || c.source || "corpus"}]`)
         .join("\n");
       const prompt =
-        (lang === "pt"
-          ? `Responda com base APENAS nos trechos abaixo. Seja claro e breve.\n\nTrechos:\n${context}\n\nPergunta: ${userText}`
-          : lang === "es"
-          ? `Responde SOLO a partir de los fragmentos. Sé claro y breve.\n\nFragmentos:\n${context}\n\nPregunta: ${userText}`
-          : `Answer ONLY from the snippets. Be clear and concise.\n\nSnippets:\n${context}\n\nQuestion: ${userText}`);
+        lang==="pt" ? `Responda APENAS com base nos trechos abaixo. Seja claro e breve.\n\nTrechos:\n${context}\n\nPergunta: ${userText}`
+      : lang==="es" ? `Responde SOLO a partir de los fragmentos. Sé claro y breve.\n\nFragmentos:\n${context}\n\nPregunta: ${userText}`
+      : `Answer ONLY from the snippets. Be clear and concise.\n\nSnippets:\n${context}\n\nQuestion: ${userText}`;
 
       const reply = await generateResponseWithHistory(from, prompt, lang);
-      // memoriza “sujeito”
       const head = rag.chunksPassing[0];
       if (head?.title) setSubject(from, head.title);
       return withBadges(reply, { basedOnCorpus: true, sources: rag.chunksPassing });
     }
 
-    // RAG falhou → FALLBACK (sempre responde)
-    const fb = await generateResponseWithHistory(
-      from,
-      markAsOutsideCorpus(userText, lang),
-      lang
-    );
+    // RAG falhou → FALLBACK
+    const fb = await generateResponseWithHistory(from, markAsOutsideCorpus(userText, lang), lang);
     return withBadges(fb, { basedOnCorpus: false });
   }
 
-  // scope === "out" → FALLBACK sempre (nunca recusar)
-  {
-    // contagem off-topic (para proteger o serviço)
-    session.off.count += 1;
-    if (session.off.count > OFFTOPIC_MAX) {
-      session.off.until = nowSec() + OFFTOPIC_COOLDOWN_MIN * 60;
-      session.off.count = 0;
-    }
-
-    // responde mesmo fora do escopo
-    const preface =
-      ANSWER_OUTSIDE_CORPUS_FIRST_N > 0 && session.off.count <= ANSWER_OUTSIDE_CORPUS_FIRST_N
-        ? shortOutsidePreface(lang) + "\n\n"
-        : "";
-    const fb = await generateResponseWithHistory(
-      from,
-      preface + markAsOutsideCorpus(userText, lang),
-      lang
-    );
-    return withBadges(fb, { basedOnCorpus: false });
+  // Fora de escopo → FALLBACK SEMPRE (nunca recusar)
+  s.off.count += 1;
+  if (s.off.count > Number(OFFTOPIC_MAX)) {
+    s.off.until = nowSec() + Number(OFFTOPIC_COOLDOWN_MIN) * 60;
+    s.off.count = 0;
   }
+  const preface = Number(ANSWER_OUTSIDE_CORPUS_FIRST_N) > 0 && s.off.count <= Number(ANSWER_OUTSIDE_CORPUS_FIRST_N)
+    ? shortOutsidePreface(lang) + "\n\n" : "";
+  const fb = await generateResponseWithHistory(from, preface + markAsOutsideCorpus(userText, lang), lang);
+  return withBadges(fb, { basedOnCorpus: false });
 }
 
-// ---------- Twilio webhook ----------
+// === Webhook (Twilio) ===
 app.post("/twilio/whatsapp", async (req, res) => {
   try {
-    const from = req.body.From || "";
-    const body = req.body.Body || "";
+    const from = (req.body.From || "").trim();
+    const body = (req.body.Body || "").trim();
 
-    // ack rápido pro Twilio
-    res.status(200).send("OK");
+    // 1) TwiML imediato → garante resposta no WhatsApp
+    const ack =
+      detectLang(body)==="es" ? "✅ Recibido, pensando…"
+      : detectLang(body)==="en" ? "✅ Received, thinking…"
+      : "✅ Recebido, pensando…";
+    res.set("Content-Type","application/xml").status(200).send(
+      `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${ack}</Message></Response>`
+    );
 
-    // “✅ pensando…”
-    if (from && TWILIO_WHATSAPP_FROM) {
-      await sendWhatsApp(from, "✅ Received, thinking...");
-    }
-
-    // texto
-    if (body && body.trim()) {
+    // 2) Processa e envia a resposta final via API do Twilio
+    if (from && body) {
       const reply = await handleIncomingText({ from, body });
       await sendWhatsApp(from, reply);
-      return;
     }
-
-    // mídia (áudio) – se quiser reativar, aqui vai futuro gancho
-    await sendWhatsApp(from, "Envie sua pergunta por texto ou áudio curto.");
   } catch (e) {
-    console.error("Webhook error:", e);
-    try {
-      const to = req.body.From;
-      if (to) await sendWhatsApp(to, "Desculpe, ocorreu um erro. Tente novamente.");
-    } catch {}
+    console.error("Webhook error:", e?.message || e);
+    // Não dá pra responder aqui porque já enviamos TwiML
   }
 });
 
-// ---------- Admin ----------
-app.get("/health", (_req, res) => res.send("ok"));
+// === Admin ===
+app.get("/health", (_req,res) => res.send("ok"));
 
-app.all("/admin/health", (req, res) => {
+app.all("/admin/health", (req,res) => {
   const token = req.query.token || req.headers["x-admin-token"];
-  if (token !== ADMIN_TOKEN) return res.status(401).json({ ok: false, error: "unauthorized" });
+  if (token !== ADMIN_TOKEN) return res.status(401).json({ ok:false, error:"unauthorized" });
   res.json({
-    ok: true,
+    ok:true,
     model: OPENAI_MODEL,
-    rag_threshold: RAG_THRESHOLD,
-    offtopic_max: OFFTOPIC_MAX
+    rag_threshold: Number(RAG_THRESHOLD),
+    offtopic_max: Number(OFFTOPIC_MAX)
   });
 });
 
-app.all("/admin/ingest/run", async (req, res) => {
+app.all("/admin/ingest/run", async (req,res) => {
   const token = req.query.token || req.headers["x-admin-token"];
-  if (token !== ADMIN_TOKEN) return res.status(401).json({ ok: false, error: "unauthorized" });
-  const mode = String(req.query.mode || "rss,sitemap").split(",").map(s => s.trim());
+  if (token !== ADMIN_TOKEN) return res.status(401).json({ ok:false, error:"unauthorized" });
+  const mode = String(req.query.mode || "rss,sitemap").split(",").map(s=>s.trim().toLowerCase());
   const out = {};
   try {
     if (typeof ingestRSS === "function" && mode.includes("rss")) out.rss = await ingestRSS();
     if (typeof ingestSitemap === "function" && mode.includes("sitemap")) out.sitemap = await ingestSitemap();
-    if (!Object.keys(out).length) return res.status(501).json({ ok: false, error: "ingest not available in this build" });
-    res.json({ ok: true, result: out });
+    if (!Object.keys(out).length) return res.status(501).json({ ok:false, error:"ingest not available" });
+    res.json({ ok:true, result: out });
   } catch (e) {
     console.error("ingest error", e);
-    res.status(500).json({ ok: false, error: String(e && e.message || e) });
+    res.status(500).json({ ok:false, error: String(e?.message || e) });
   }
 });
 
-// ---------- WhatsApp send (Twilio API) ----------
-async function sendWhatsApp(to, text) {
-  // envio via API Messages — aqui usamos a API clássica do Twilio (mensagem simples)
-  // Como você já está com o webhook funcionando, este envio pode ser opcional.
-  // Caso seu setup envie resposta via TwiML bin / reply automático, comente esta função inteira.
-  try {
-    // NOP: muitos setups respondem via Twilio “reply”. Se você já vê as respostas chegando,
-    // pode ignorar este envio ativo. Deixamos aqui como placeholder.
-    // console.log("->", to, text.slice(0, 80));
-  } catch (e) {
-    console.error("sendWhatsApp error", e.message);
-  }
-}
-
-// ---------- start ----------
+// === Start ===
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("True Live server up on", PORT));
+app.listen(PORT, () => console.log("True Live up on", PORT));
