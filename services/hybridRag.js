@@ -1,160 +1,282 @@
-// services/hybridRag.js — v2.1.6 (híbrido leve com normalização, aliases, boost e limiar dinâmico)
+// services/hybridRag.js — True Live v2.3 “best”
+// RAG híbrido + recency boost + ingestão RSS/Sitemap + classificador amplo
+// ESM (package.json: { "type": "module" })
 
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
+import crypto from "crypto";
 
-// ===== Config =====
-const BASE_THRESHOLD = Number(process.env.RAG_THRESHOLD || "0.4"); // ajuste via Heroku Config Vars
-const MAX_CHUNKS = 6;
+// ====== Paths ======
+const DATA_DIR    = path.resolve("data");
+const DOCS_PATH   = path.join(DATA_DIR, "docs.json");
+const INDEX_PATH  = path.join(DATA_DIR, "index.json");
+const FEEDS_PATH  = path.resolve("config/feeds.json");
+const WL_PATH     = path.resolve("config/whitelist.json");
+const ALIASES_PATH= path.resolve("config/aliases.json");
 
-// ===== Helpers =====
-const stripAccents = s => (s || "")
-  .normalize("NFD")
-  .replace(/[\u0300-\u036f]/g, "")
-  .toLowerCase();
+// ====== Params ======
+const RAG_THRESHOLD        = Number(process.env.RAG_THRESHOLD || "0.4");
+const MAX_DOCS_PER_RUN     = 60;
+const MAX_FETCH_PER_SITE   = 20;
+const MAX_CHUNKS_PER_DOC   = 40;
+const HALF_LIFE_DAYS       = 30; // time-decay (recency)
 
-const clean = s =>
-  stripAccents(String(s || "").replace(/[^\p{L}\p{N}\s-]/gu, " "))
-    .replace(/\s+/g, " ")
-    .trim();
+// ====== State ======
+let DOCS = [];
+let INDEX = [];
+let WHITELIST = { A: [], B: [] };
+let ALIASES = {};
 
-function loadJSON(p) {
-  try { return JSON.parse(fs.readFileSync(p, "utf-8")); }
-  catch { return null; }
+// ====== FS helpers ======
+async function ensureData() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  if (!(await exists(DOCS_PATH))) await fs.writeFile(DOCS_PATH, "[]");
+  if (!(await exists(INDEX_PATH))) await fs.writeFile(INDEX_PATH, "[]");
+}
+async function exists(p) { try { await fs.stat(p); return true; } catch { return false; } }
+async function loadAll() {
+  await ensureData();
+  try { DOCS = JSON.parse(await fs.readFile(DOCS_PATH, "utf8") || "[]"); } catch { DOCS = []; }
+  try { INDEX = JSON.parse(await fs.readFile(INDEX_PATH, "utf8") || "[]"); } catch { INDEX = []; }
+  try { WHITELIST = JSON.parse(await fs.readFile(WL_PATH, "utf8")); } catch { WHITELIST = { A: [], B: [] }; }
+  try { ALIASES = JSON.parse(await fs.readFile(ALIASES_PATH, "utf8")); } catch { ALIASES = {}; }
+}
+async function persist() {
+  await fs.writeFile(DOCS_PATH, JSON.stringify(DOCS, null, 2));
+  await fs.writeFile(INDEX_PATH, JSON.stringify(INDEX, null, 2));
 }
 
-// Carrega corpus e aliases
-const corpusPath = path.join(process.cwd(), "corpus", "corpus.json");
-const aliasesPath = path.join(process.cwd(), "config", "aliases.json");
-
-const CORPUS = loadJSON(corpusPath) || [];
-const RAW_ALIASES = loadJSON(aliasesPath) || {};
-
-const ALIASES = (() => {
-  const out = {};
-  for (const [k, v] of Object.entries(RAW_ALIASES)) out[clean(k)] = clean(v || "");
-  return out;
-})();
-
-// Conjunto de entidades canônicas para boost (parte esquerda do título antes de “—”, se houver)
-const ENTITY_CANONICALS = new Set(
-  CORPUS.map(c => clean((c.title || "").split("—")[0] || c.title || "")).filter(Boolean)
-);
-
-// Tokenização & bigramas
-const tokenize = s => clean(s).split(" ").filter(Boolean);
-const bigrams = tokens => {
-  const arr = [];
-  for (let i = 0; i < tokens.length - 1; i++) arr.push(tokens[i] + " " + tokens[i + 1]);
-  return arr;
-};
-
-// BM25-lite (heurística simples)
-function scoreBM25Lite(qTokens, dTokens) {
-  if (!qTokens.length || !dTokens.length) return 0;
-  const D = dTokens.length;
-  let score = 0;
-  const present = new Set(dTokens);
-  const idf = t => 1 / (1 + (present.has(t) ? 1 : 0.2)); // se termo existe no doc, idf menor
-  const tf = t => dTokens.filter(x => x === t).length / D;
-  for (const t of qTokens) score += idf(t) * Math.sqrt(tf(t));
-  return score;
+// ====== Utils ======
+function uid(s) { return crypto.createHash("sha1").update(String(s)).digest("hex").slice(0,16); }
+function domainOf(url) { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; } }
+function inWhitelist(url) {
+  const d = domainOf(url);
+  return WHITELIST.A.includes(d) || WHITELIST.B.includes(d);
 }
-
-// Aplica aliases numa string "clean"
-function applyAliasesClean(s) {
-  let out = s;
-  for (const [from, to] of Object.entries(ALIASES)) {
-    if (!from) continue;
-    const re = new RegExp(`\\b${from}\\b`, "g");
-    out = out.replace(re, to);
+function trustLevel(url) {
+  const d = domainOf(url);
+  if (WHITELIST.A.includes(d)) return "A";
+  if (WHITELIST.B.includes(d)) return "B";
+  return "X";
+}
+function escapeReg(x){return x.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");}
+function normalize(s=""){
+  let out=(s||"").normalize("NFKD").replace(/[\u0300-\u036f]/g,"");
+  if (ALIASES && typeof ALIASES==="object"){
+    for (const [k,v] of Object.entries(ALIASES)){
+      const re=new RegExp(`\\b${escapeReg(k)}\\b`,"gi");
+      out=out.replace(re,v);
+    }
   }
   return out;
 }
-
-// ===== API pública =====
-export function classifyScope(q) {
-  const t = stripAccents(q || "");
-  return /(israel|sion|zion|juda|antisemit|sho|holoc|yom|kippur|hamas|hezb|idf|jvl|yad|jerus|tel aviv|rabin|ben.?gurion|golda|meir|shalom)/.test(t)
-    ? "in" : "out";
+function tokens(s=""){
+  return normalize(String(s).toLowerCase())
+    .replace(/[^a-z0-9\u00C0-\u024f\- ]+/gi," ")
+    .split(/\s+/).filter(Boolean);
 }
 
-// Stubs (seu ingestor real pode estar em outro módulo)
-export async function ingestRSS()     { return { added: 0, total: 0 }; }
-export async function ingestSitemap() { return { added: 0, total: 0 }; }
+// ====== Classifier (alto recall) ======
+const IN_KEYWORDS = [
+  // núcleo temático
+  "israel","estado de israel","judaismo","judaísmo","juda","zion","sion","sionismo",
+  "antisemit","antissemit","ihra","holocausto","shoah","nakba",
+  "idf","tsahal","forcas de defesa de israel","forças de defesa de israel",
+  "knesset","mfa","yad vashem","jerusalem","jerusalém","jerus","jerusal",
+  // líderes / pessoas
+  "golda","meir","golda meir","ben-gurion","ben gurion","david ben-gurion",
+  "itzhak rabin","rabin","sharon","peres","herzl","netanyahu","benjamin netanyahu",
+  // orgs / conflito
+  "hamas","hezbollah","hezbolah","hizbollah","fdi","olp","plo","fatah","intifada",
+  "guerra do yom kipur","yom kippur","acordos de oslo","oslo",
+  // topônimos
+  "gaza","faixa de gaza","gaza strip","cisjordania","west bank",
+  "judeia e samaria","samaria","judeia","hebron","belém","bethlehem",
+  "ramallah","rafah","khan yunis","sderot","ashkelon","ashdod","lod","acre","tel aviv","haifa","galileia","neguev"
+];
 
-// ===== Recuperação híbrida =====
-export async function retrieveHybrid(query, k = MAX_CHUNKS, preferRecency = false) {
-  try {
-    // Normaliza & aplica aliases na query
-    let qClean = applyAliasesClean(clean(query));
-    const qTokens  = tokenize(qClean);
-    const qBigrams = bigrams(qTokens);
+export function classifyScope(text=""){
+  const t=normalize((text||"").toLowerCase());
+  if (/^(quem|qual|quais|onde|quando|como|ele|ela|dele|dela|seu|sua)\b/i.test(t)) return "maybe";
+  for (const k of IN_KEYWORDS){ if (t.includes(k)) return "in"; }
+  return "out";
+}
 
-    // Detecta entidade canônica presente na query
-    let entityBoostHit = false;
-    for (const ent of ENTITY_CANONICALS) {
-      if (ent && qClean.includes(ent)) { entityBoostHit = ent; break; }
-    }
+// ====== Scoring (léxico simples + título) ======
+function bm25ish(query, text){
+  const q=tokens(query), tt=tokens(text);
+  if(!q.length||!tt.length) return 0;
+  const tf=Object.create(null); for (const w of tt) tf[w]=(tf[w]||0)+1;
+  let score=0; for (const w of q){ const f=tf[w]||0; if (f) score+=Math.log(1+f); }
+  return score/Math.log(10+tt.length);
+}
+function jaccardTitle(query, title){
+  const a=new Set(tokens(query)), b=new Set(tokens(title));
+  if(!a.size||!b.size) return 0;
+  let inter=0; for (const w of a) if (b.has(w)) inter++;
+  return inter/(a.size+b.size-inter);
+}
+function recencyBoost(iso){
+  if(!iso) return 1.0;
+  const days=Math.max(0,(Date.now()-new Date(iso).getTime())/86400000);
+  const decay=Math.pow(0.5, days/HALF_LIFE_DAYS);
+  return 0.6 + 0.4*decay; // piso 0.6 para não “matar” conteúdo bom
+}
 
-    const scored = [];
+// ====== Retrieve ======
+export async function retrieveHybrid(query, k=6, preferRecent=false){
+  await loadAll();
+  const scored = INDEX.map(ch=>{
+    const sText  = bm25ish(query, ch.text);
+    const sTitle = jaccardTitle(query, ch.title||"");
+    const base   = 0.6*sText + 0.4*sTitle;
+    const rec    = preferRecent ? recencyBoost(ch.date) : 1.0;
+    const trustW = ch.trust==="A" ? 1.0 : (ch.trust==="B" ? 0.95 : 0.8);
+    return { ...ch, score: base*rec*trustW };
+  }).sort((a,b)=> b.score - a.score);
 
-    for (const doc of CORPUS) {
-      const titleRaw = doc.title || "";
-      const textRaw  = doc.text  || "";
+  const top = scored.slice(0, Math.max(6,k)).map(x=>({title:x.title, score:Number(x.score.toFixed(3))}));
+  console.log("RAG top:", top);
+  const passing = scored.filter(d=> d.score >= RAG_THRESHOLD).slice(0,k);
+  const pass = passing.length>0;
+  console.log(`RAG pass: ${pass} threshold: ${RAG_THRESHOLD} query: ${query}`);
 
-      // Normaliza corpo e TÍTULO (com aliases!)
-      const titleClean = applyAliasesClean(clean(titleRaw));
-      const dClean = applyAliasesClean(clean(`${titleRaw}. ${textRaw}`));
-      const dTokens = tokenize(dClean);
-      const dBigrams = bigrams(dTokens);
+  return { pass, chunks: scored.slice(0,k), chunksPassing: passing };
+}
 
-      // Score lexical + fuzzy
-      let s = scoreBM25Lite(qTokens, dTokens);
+// ====== Ingest (RSS + Sitemap) ======
+export async function ingestRSS(){
+  await loadAll();
+  let feeds; try{ feeds=JSON.parse(await fs.readFile(FEEDS_PATH,"utf8")); }catch{ feeds={rss:[],sitemaps:[]}; }
+  const urls=(feeds.rss||[]).slice(0,30);
 
-      // Fuzzy por bigramas (casamentos parciais ajudam nomes próprios)
-      let matchBigrams = 0;
-      for (const bg of qBigrams) if (dBigrams.includes(bg)) matchBigrams++;
-      s += 0.4 * (matchBigrams / Math.max(1, qBigrams.length));
-
-      // Boost se o título contém a entidade detectada
-      if (entityBoostHit && titleClean.includes(entityBoostHit)) s += 0.7;
-
-      // Bônus leve de recência se pedido e houver data
-      if (preferRecency && doc.date) {
-        const y = parseInt(String(doc.date).slice(0, 4), 10);
-        if (!isNaN(y)) s += Math.max(0, (y - 1948)) * 0.001;
+  let added=0;
+  for (const u of urls){
+    try{
+      const xml = await (await fetch(u)).text();
+      const items = parseRSS(xml).slice(0, MAX_FETCH_PER_SITE);
+      for (const it of items){
+        if (!it.link || !inWhitelist(it.link)) continue;
+        if (haveDoc(it.link)) continue;
+        const html = await safeFetch(it.link); if (!html) continue;
+        const text = extractMainText(html); if (!text) continue;
+        pushDoc({ title: it.title || titleFromHTML(html) || domainOf(it.link), url: it.link, date: it.pubDate || dateFromHTML(html), text });
+        if (++added >= MAX_DOCS_PER_RUN) break;
       }
-
-      scored.push({ doc, score: s });
-    }
-
-    // Ordena por score desc e pega top-k
-    scored.sort((a, b) => b.score - a.score);
-    const top = scored.slice(0, k);
-
-    // Limiar dinâmico: mais permissivo para nome próprio/consulta curta
-    const isShortQuery = qTokens.length <= 3;
-    const isPerson = /\b(ben.?gurion|golda|rabin|peres|begin|dayan|shamir|weizmann|herzl|sharon)\b/i.test(query || "");
-    const dynTh = (isShortQuery || isPerson) ? Math.min(0.35, BASE_THRESHOLD) : BASE_THRESHOLD;
-
-    const pass = (top[0]?.score || 0) >= dynTh;
-
-    // Logs de diagnóstico (aparecem no Heroku)
-    console.log("RAG top:", top.slice(0, 3).map(x => ({ title: x.doc.title, score: +x.score.toFixed(3) })));
-    console.log("RAG pass:", pass, "threshold:", dynTh, "query:", query);
-
-    // Prepara chunks (1–2 frases + metadados)
-    const chunksPassing = pass ? top.map(x => ({
-      title: x.doc.title,
-      text: (x.doc.text || "").split(". ").slice(0, 2).join(". "),
-      source: x.doc.source || "corpus",
-      date: x.doc.date || ""
-    })) : [];
-
-    return { pass, chunks: top.map(x => x.doc), chunksPassing };
-  } catch (e) {
-    console.error("retrieveHybrid error:", e);
-    return { pass: false, chunks: [], chunksPassing: [] };
+      if (added >= MAX_DOCS_PER_RUN) break;
+    }catch(e){ console.error("RSS error", u, e.message); }
   }
+  if (added) await rebuildIndex();
+  return { added, totalDocs: DOCS.length, totalChunks: INDEX.length };
+}
+
+export async function ingestSitemap(){
+  await loadAll();
+  let feeds; try{ feeds=JSON.parse(await fs.readFile(FEEDS_PATH,"utf8")); }catch{ feeds={rss:[],sitemaps:[]}; }
+  const urls=(feeds.sitemaps||[]).slice(0,20);
+
+  let added=0;
+  for (const u of urls){
+    try{
+      const xml = await (await fetch(u)).text();
+      const items = parseSitemap(xml).slice(0, MAX_FETCH_PER_SITE);
+      for (const it of items){
+        if (!it.loc || !inWhitelist(it.loc)) continue;
+        if (haveDoc(it.loc)) continue;
+        const html = await safeFetch(it.loc); if (!html) continue;
+        const text = extractMainText(html); if (!text) continue;
+        pushDoc({ title: titleFromHTML(html) || domainOf(it.loc), url: it.loc, date: it.lastmod || dateFromHTML(html), text });
+        if (++added >= MAX_DOCS_PER_RUN) break;
+      }
+      if (added >= MAX_DOCS_PER_RUN) break;
+    }catch(e){ console.error("Sitemap error", u, e.message); }
+  }
+  if (added) await rebuildIndex();
+  return { added, totalDocs: DOCS.length, totalChunks: INDEX.length };
+}
+
+// ====== Ingest helpers ======
+function parseRSS(xml=""){
+  const out=[]; const items=xml.split(/<item[\s>]/i).slice(1);
+  for (const it of items){
+    const title=pickTag(it,"title");
+    const link =pickTag(it,"link");
+    const pub  =pickTag(it,"pubDate")||pickTag(it,"dc:date");
+    out.push({ title, link, pubDate: pub });
+  }
+  return out;
+}
+function parseSitemap(xml=""){
+  const out=[]; const urls=xml.split(/<url>/i).slice(1);
+  for (const u of urls){
+    const loc=pickTag(u,"loc");
+    const lastmod=pickTag(u,"lastmod");
+    out.push({ loc, lastmod });
+  }
+  return out;
+}
+function pickTag(block, tag){
+  const m = block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`,"i"));
+  return m? m[1].trim() : "";
+}
+async function safeFetch(url){
+  try{
+    const res = await fetch(url,{ headers:{ "user-agent":"TrueLiveBot/1.0" }});
+    if(!res.ok) return "";
+    return await res.text();
+  }catch{ return ""; }
+}
+function titleFromHTML(html=""){
+  const m=html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return m? m[1].replace(/\s+/g," ").trim() : "";
+}
+function dateFromHTML(html=""){
+  const metas=[
+    /<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+name=["']pubdate["'][^>]+content=["']([^"']+)["']/i,
+    /<time[^>]+datetime=["']([^"']+)["']/i
+  ];
+  for (const re of metas){ const m=html.match(re); if (m) return m[1]; }
+  return "";
+}
+function extractMainText(html=""){
+  const art = html.match(/<article[\s\S]*?<\/article>/i)?.[0] || html;
+  const ps = Array.from(art.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi))
+    .map(m=>m[1].replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim())
+    .filter(Boolean);
+  const text = ps.join("\n");
+  return text.length>200 ? text : "";
+}
+function haveDoc(url){ return DOCS.some(d=>d.url===url); }
+function pushDoc({title,url,date,text}){
+  const id = uid(url);
+  const source = domainOf(url);
+  const trust = trustLevel(url);
+  DOCS.push({ id, title, url, date, source, trust, text });
+}
+async function rebuildIndex(){
+  const chunks=[];
+  for (const d of DOCS){
+    const parts = splitSentences(d.text).slice(0, MAX_CHUNKS_PER_DOC);
+    for (const p of parts){
+      chunks.push({
+        id: `${d.id}:${uid(p.slice(0,64))}`,
+        docId: d.id,
+        title: d.title,
+        url: d.url,
+        date: d.date||"",
+        source: d.source,
+        trust: d.trust,
+        text: p
+      });
+    }
+  }
+  INDEX = chunks;
+  await persist();
+  console.log(`Rebuilt index: ${DOCS.length} docs, ${INDEX.length} chunks`);
+}
+function splitSentences(t=""){
+  const s = t.replace(/\s+/g," ").split(/(?<=[.?!])\s+(?=[A-ZÀ-ÖØ-Þ])/g).filter(x=>x && x.length>40);
+  const out=[]; for (let i=0;i<s.length;i+=2){ out.push([s[i], s[i+1]].filter(Boolean).join(" ")); }
+  return out;
 }
