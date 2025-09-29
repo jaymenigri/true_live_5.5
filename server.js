@@ -158,7 +158,19 @@ app.post("/twilio/whatsapp", async (req, res) => {
     const mediaType = (req.body.MediaContentType0 || "").toLowerCase();
 
     const lang = detectLang(body);
-    const scope = classifyScope(body);
+let scope = classifyScope(body);
+
+// se escopo sair "fora", mas a pergunta for curta e houver contexto anterior dentro do escopo → herda
+if (scope !== "in") {
+  const low = (body || "").toLowerCase();
+  if (/^(quem|qual|onde|quando|como|ele|ela|dele|dela|seu|sua)/.test(low)) {
+    const hist = histGet(from);
+    const lastIn = [...hist].reverse().find(m => m.role === "user" && classifyScope(m.content) === "in");
+    if (lastIn) {
+      scope = "in"; // herda escopo
+    }
+  }
+}
 
     // Rate limit diário
     const used = incCount(from);
