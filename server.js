@@ -1,12 +1,14 @@
-// server.js — True Live v2.3.4
+// server.js — True Live v2.4.0 (definitivo)
 // - ACK imediato via TwiML
-// - Envio ativo da resposta via Twilio Messages API
-// - OpenAI endpoint corrigido para /v1/chat/completions
-// - Watchdog: se pipeline demorar/errar, envia fallback seguro
-// - Logs claros para inspeção no Heroku
+// - Pipeline com watchdog e fallback garantido
+// - OpenAI /v1 chat completions
+// - Logs estruturados (reqId) com controle por LOG_LEVEL
+// - Rodapés coerentes: corpus vs fallback
+// - Rotas admin: /health, /admin/health, /admin/ingest/run
 
 import express from "express";
 import fetch from "node-fetch";
+import crypto from "crypto";
 import {
   classifyScope,
   retrieveHybrid,
@@ -14,7 +16,7 @@ import {
   ingestSitemap,
 } from "./services/hybridRag.js";
 
-// ===== ENV =====
+// ====== ENV ======
 const {
   ADMIN_TOKEN = "truelive2025",
   OPENAI_API_KEY,
@@ -26,30 +28,48 @@ const {
   RAG_THRESHOLD = "0.4",
   OFFTOPIC_MAX = "3",
   OFFTOPIC_COOLDOWN_MIN = "15",
+  LOG_LEVEL = "info", // debug|info|warn|error
 } = process.env;
 
 const OPENAI_TIMEOUT = Number(OPENAI_TIMEOUT_MS);
 
-// ===== App =====
+// ====== LOGGING ======
+const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+const LV = LEVELS[LOG_LEVEL] ?? 20;
+const log = {
+  debug: (...a) => { if (LV <= 10) console.log("[DEBUG]", ...a); },
+  info:  (...a) => { if (LV <= 20) console.log("[INFO] ", ...a); },
+  warn:  (...a) => { if (LV <= 30) console.warn("[WARN] ", ...a); },
+  error: (...a) => console.error("[ERROR]", ...a),
+};
+
+// ====== APP ======
 const app = express();
-// Twilio envia application/x-www-form-urlencoded
+// Twilio envia application/x-www-form-urlencoded:
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ===== Memória de sessão (leve) =====
-const sessions = new Map(); // from -> { history:[], subject:"", off:{count,until} }
+// ====== SESSÃO (24h leve) ======
+const sessions = new Map(); // from -> { history:[], subject:"", off:{count,until}, ts }
+const DAY = 24 * 3600 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of sessions.entries()) {
+    if ((v.ts || 0) + DAY < now) sessions.delete(k);
+  }
+}, 60 * 60 * 1000);
 
 function getSession(from) {
-  if (!sessions.has(from)) {
-    sessions.set(from, { history: [], subject: "", off: { count: 0, until: 0 } });
-  }
-  return sessions.get(from);
+  const s = sessions.get(from) || { history: [], subject: "", off: { count: 0, until: 0 }, ts: Date.now() };
+  s.ts = Date.now();
+  sessions.set(from, s);
+  return s;
 }
 function nowSec() { return Math.floor(Date.now() / 1000); }
 function setSubject(from, title) { const s = getSession(from); if (title) s.subject = title; }
 function getSubject(from) { return getSession(from).subject || ""; }
 
-// ===== Utils =====
+// ====== UTILS ======
 function detectLang(text = "") {
   const t = text.toLowerCase();
   if (/[áéíóúãõç]/.test(t) || t.includes(" que ")) return "pt";
@@ -74,7 +94,7 @@ function footer(text, { basedOnCorpus, sources } = {}) {
     const names = (sources || []).map(s => s.title || s.source || "corpus").slice(0, 6);
     if (names.length) lines.push(`Fontes: ${names.join(" | ")}`);
   } else {
-    lines.push("Resposta fora do acervo.");
+    lines.push("Resposta geral (fora do acervo).");
   }
   return `${text}\n\n${lines.join("\n")}`;
 }
@@ -86,17 +106,19 @@ function outsidePrompt(q, lang) {
   };
   return `${m[lang] || m.pt}\n\nPergunta: ${q}`;
 }
+function reqId() {
+  return crypto.randomBytes(6).toString("hex");
+}
 
-// ===== OpenAI Chat =====
-async function openaiChat(messages, lang = "pt") {
+// ====== OPENAI ======
+async function openaiChat(messages, lang = "pt", rid = "-") {
   const controller = new AbortController();
   const to = setTimeout(() => controller.abort(), OPENAI_TIMEOUT);
   try {
-    // ENDPOINT CORRIGIDO:
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "authorization": `Bearer ${OPENAI_API_KEY}`,
+        authorization: `Bearer ${OPENAI_API_KEY}`,
         "content-type": "application/json",
       },
       body: JSON.stringify({
@@ -108,12 +130,13 @@ async function openaiChat(messages, lang = "pt") {
     });
 
     if (!res.ok) {
-      const t = await res.text();
-      throw new Error(`OpenAI HTTP ${res.status}: ${t.slice(0, 400)}`);
+      const body = await res.text();
+      throw new Error(`OpenAI HTTP ${res.status} — ${body.slice(0, 500)}`);
     }
 
     const js = await res.json();
     const out = js?.choices?.[0]?.message?.content?.trim() || "";
+    log.debug(rid, "OpenAI ok");
     return (
       out ||
       (lang === "pt"
@@ -123,20 +146,20 @@ async function openaiChat(messages, lang = "pt") {
         : "Sorry, I couldn’t generate the answer.")
     );
   } catch (e) {
-    console.error("OpenAI error:", e?.message || e);
+    log.error(rid, "OpenAI error:", e?.message || e);
     return (
-      (lang === "pt"
+      lang === "pt"
         ? "Desculpe, tive um problema técnico."
         : lang === "es"
         ? "Perdón, tuve un problema técnico."
-        : "Sorry, I had a technical issue.")
+        : "Sorry, I had a technical issue."
     );
   } finally {
     clearTimeout(to);
   }
 }
 
-async function answerWithHistory(userId, prompt, lang) {
+async function answerWithHistory(userId, prompt, lang, rid = "-") {
   const s = getSession(userId);
   const sys =
     lang === "pt"
@@ -145,155 +168,133 @@ async function answerWithHistory(userId, prompt, lang) {
       ? "Eres un asistente claro, conciso y factual. No agregues pies de página."
       : "You are a clear, concise, factual assistant. Do not add footers.";
   const msgs = [{ role: "system", content: sys }, ...s.history.slice(-8), { role: "user", content: prompt }];
-  const reply = await openaiChat(msgs, lang);
+  const reply = await openaiChat(msgs, lang, rid);
   s.history.push({ role: "user", content: prompt });
   s.history.push({ role: "assistant", content: reply });
   return reply;
 }
 
-// ===== Twilio Send (Messages API) =====
-async function sendWhatsApp(to, body) {
+// ====== TWILIO SEND ======
+async function sendWhatsApp(to, body, rid = "-") {
   try {
     if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_WHATSAPP_FROM) {
-      console.error("Twilio ENV missing; cannot send message.");
+      log.error(rid, "Twilio ENV missing; cannot send message.");
       return;
     }
     const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
     const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
-    const form = new URLSearchParams({
-      From: TWILIO_WHATSAPP_FROM,
-      To: to,
-      Body: body,
-    });
+    const form = new URLSearchParams({ From: TWILIO_WHATSAPP_FROM, To: to, Body: body });
     const res = await fetch(url, {
       method: "POST",
-      headers: {
-        Authorization: `Basic ${auth}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
+      headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" },
       body: form,
     });
     const txt = await res.text();
-    if (!res.ok) console.error("Twilio send error:", res.status, txt.slice(0, 300));
-  } catch (e) {
-    console.error("sendWhatsApp error", e?.message || e);
-  }
+    if (!res.ok) log.error(rid, "Twilio send error:", res.status, txt.slice(0, 400));
+    else log.debug(rid, "Twilio sent");
+  } catch (e) { log.error(rid, "sendWhatsApp error", e?.message || e); }
 }
 
-// ===== Core de processamento =====
-async function handleIncomingText({ from, body }) {
+// ====== CORE ======
+async function handleIncomingText({ from, body, rid }) {
   const lang = detectLang(body);
   const s = getSession(from);
 
-  // Cooldown para flood off-topic
   if (s.off.until > nowSec()) {
     const mins = Math.max(1, Math.ceil((s.off.until - nowSec()) / 60));
-    return (
-      lang === "pt"
-        ? `Voltamos em breve. Pausa de ${mins} min.`
-        : lang === "es"
-        ? `Volvemos pronto. Pausa de ${mins} min.`
-        : `We'll be back soon. Cooldown ${mins} min.`
-    );
+    return lang === "pt" ? `Voltamos em breve. Pausa de ${mins} min.`
+         : lang === "es" ? `Volvemos pronto. Pausa de ${mins} min.`
+                         : `We'll be back soon. Cooldown ${mins} min.`;
   }
 
-  const scope = classifyScope(body); // "in" | "maybe" | "out"
+  const scope = classifyScope(body); // "in"|"maybe"|"out"
   const preferRecent = detectRecencyIntent(body);
   const eff = expandIfPronominal(body, getSubject(from));
 
-  console.log(`[IN] from=${from} lang=${lang} scope=${scope} recent=${preferRecent} q="${body}"`);
-  console.log("Effective query:", eff);
+  log.info(rid, `IN scope=${scope} recent=${preferRecent} lang=${lang}`);
+  log.debug(rid, "Q:", body);
+  log.debug(rid, "Effective:", eff);
 
   try {
     if (scope === "in" || scope === "maybe") {
       const rag = await retrieveHybrid(eff, 6, preferRecent);
       if (rag?.pass && rag?.chunksPassing?.length) {
-        const ctx = rag.chunksPassing
-          .map((c) => `• ${c.text} [${c.title || c.source || "corpus"}]`)
-          .join("\n");
+        const ctx = rag.chunksPassing.map(c => `• ${c.text} [${c.title || c.source || "corpus"}]`).join("\n");
         const prompt =
-          lang === "pt"
-            ? `Responda APENAS com base nos trechos abaixo. Seja claro e breve.\n\nTrechos:\n${ctx}\n\nPergunta: ${body}`
-            : lang === "es"
-            ? `Responde SOLO a partir de los fragmentos. Sé claro y breve.\n\nFragmentos:\n${ctx}\n\nPregunta: ${body}`
-            : `Answer ONLY from the snippets. Be clear and concise.\n\nSnippets:\n${ctx}\n\nQuestion: ${body}`;
-        const reply = await answerWithHistory(from, prompt, lang);
-        const head = rag.chunksPassing[0];
-        if (head?.title) setSubject(from, head.title);
+          lang === "pt" ? `Responda APENAS com base nos trechos abaixo. Seja claro e breve.\n\nTrechos:\n${ctx}\n\nPergunta: ${body}`
+        : lang === "es" ? `Responde SOLO a partir de los fragmentos. Sé claro y breve.\n\nFragmentos:\n${ctx}\n\nPregunta: ${body}`
+                        : `Answer ONLY from the snippets. Be clear and concise.\n\nSnippets:\n${ctx}\n\nQuestion: ${body}`;
+        const reply = await answerWithHistory(from, prompt, lang, rid);
+        const head = rag.chunksPassing[0]; if (head?.title) setSubject(from, head.title);
         return footer(reply, { basedOnCorpus: true, sources: rag.chunksPassing });
       }
-
-      // RAG falhou → FALLBACK
-      const fb = await answerWithHistory(from, outsidePrompt(body, lang), lang);
+      // sem passagem no corpus → fallback
+      const fb = await answerWithHistory(from, outsidePrompt(body, lang), lang, rid);
       return footer(fb, { basedOnCorpus: false });
     }
 
-    // Fora de escopo → FALLBACK sempre (sem recusar)
+    // fora de escopo → sempre fallback (sem recusar)
     s.off.count += 1;
     if (s.off.count > Number(OFFTOPIC_MAX)) {
       s.off.until = nowSec() + Number(OFFTOPIC_COOLDOWN_MIN) * 60;
       s.off.count = 0;
     }
-    const fb = await answerWithHistory(from, outsidePrompt(body, lang), lang);
+    const fb = await answerWithHistory(from, outsidePrompt(body, lang), lang, rid);
     return footer(fb, { basedOnCorpus: false });
   } catch (e) {
-    console.error("handleIncomingText error", e?.message || e);
-    const msg =
-      lang === "pt"
-        ? "Desculpe, tive um problema, mas aqui vai uma explicação geral:"
-        : lang === "es"
-        ? "Perdón, tuve un problema, pero aquí va una explicación general:"
-        : "Sorry, I had an issue, but here is a general explanation:";
-    const fb = await answerWithHistory(from, `${msg}\n\n${outsidePrompt(body, lang)}`, lang);
+    log.error(rid, "handleIncomingText error:", e?.message || e);
+    const msg = lang === "pt" ? "Desculpe, tive um problema, mas aqui vai uma explicação geral:"
+              : lang === "es" ? "Perdón, tuve un problema, pero aquí va una explicación general:"
+                               : "Sorry, I had an issue, but here is a general explanation:";
+    const fb = await answerWithHistory(from, `${msg}\n\n${outsidePrompt(body, lang)}`, lang, rid);
     return footer(fb, { basedOnCorpus: false });
   }
 }
 
-// ===== Webhook (Twilio) — ACK + Watchdog =====
+// ====== TWILIO WEBHOOK ======
 app.post("/twilio/whatsapp", async (req, res) => {
+  const rid = reqId();
   const from = (req.body.From || "").trim();
   const body = (req.body.Body || "").trim();
   const lang = detectLang(body);
 
-  // 1) ACK imediato (TwiML)
   const ack = lang === "es" ? "✅ Recibido, pensando…" : lang === "en" ? "✅ Received, thinking…" : "✅ Recebido, pensando…";
   res
     .set("Content-Type", "application/xml")
     .status(200)
     .send(`<?xml version="1.0" encoding="UTF-8"?><Response><Message>${ack}</Message></Response>`);
 
-  // 2) Pipeline com watchdog/fallback
+  log.info(rid, "ACK sent", { from });
+
   try {
-    const watchdogMs = Math.max(OPENAI_TIMEOUT, 12000) + 2000; // timeout do OpenAI + 2s
-    const task = (async () => await handleIncomingText({ from, body }))();
-    const guard = new Promise((resolve) => setTimeout(() => resolve("__TIMEOUT__"), watchdogMs));
+    const watchdogMs = Math.max(OPENAI_TIMEOUT, 12000) + 2000;
+    const task = (async () => await handleIncomingText({ from, body, rid }))();
+    const guard = new Promise(resolve => setTimeout(() => resolve("__TIMEOUT__"), watchdogMs));
     const result = await Promise.race([task, guard]);
 
     if (result === "__TIMEOUT__") {
-      console.warn("watchdog timeout, sending safe fallback");
-      const safe =
-        lang === "pt"
-          ? "Demorou mais que o esperado, então aqui vai uma resposta geral. Pode perguntar novamente."
-          : lang === "es"
-          ? "Tardó más de lo esperado, así que aquí va una respuesta general. Puedes preguntar de nuevo."
-          : "Took longer than expected, so here is a general answer. You can ask again.";
-      await sendWhatsApp(from, footer(safe, { basedOnCorpus: false }));
+      log.warn(rid, "watchdog timeout");
+      const safe = lang === "pt"
+        ? "Demorou mais que o esperado, então aqui vai uma resposta geral. Pode perguntar novamente."
+        : lang === "es"
+        ? "Tardó más de lo esperado, así que aquí va una respuesta general. Puedes preguntar de nuevo."
+        : "Took longer than expected, so here is a general answer. You can ask again.";
+      await sendWhatsApp(from, footer(safe, { basedOnCorpus: false }), rid);
     } else {
-      await sendWhatsApp(from, result);
+      await sendWhatsApp(from, result, rid);
     }
   } catch (e) {
-    console.error("webhook outer error", e?.message || e);
-    const fallback =
-      lang === "pt"
-        ? "Desculpe, ocorreu um erro. Aqui vai uma resposta geral."
-        : lang === "es"
-        ? "Perdón, ocurrió un error. Aquí va una respuesta general."
-        : "Sorry, an error occurred. Here is a general answer.";
-    await sendWhatsApp(from, footer(fallback, { basedOnCorpus: false }));
+    log.error(rid, "webhook outer error:", e?.message || e);
+    const fallback = lang === "pt"
+      ? "Desculpe, ocorreu um erro. Aqui vai uma resposta geral."
+      : lang === "es"
+      ? "Perdón, ocurrió un error. Aquí va una respuesta general."
+      : "Sorry, an error occurred. Here is a general answer.";
+    await sendWhatsApp(from, footer(fallback, { basedOnCorpus: false }), rid);
   }
 });
 
-// ===== Admin =====
+// ====== ADMIN ======
 app.get("/health", (_req, res) => res.send("ok"));
 
 app.all("/admin/health", (req, res) => {
@@ -304,13 +305,14 @@ app.all("/admin/health", (req, res) => {
     model: OPENAI_MODEL,
     rag_threshold: Number(RAG_THRESHOLD),
     openai_timeout_ms: OPENAI_TIMEOUT,
+    log_level: LOG_LEVEL,
   });
 });
 
 app.all("/admin/ingest/run", async (req, res) => {
   const token = req.query.token || req.headers["x-admin-token"];
   if (token !== ADMIN_TOKEN) return res.status(401).json({ ok: false, error: "unauthorized" });
-  const mode = String(req.query.mode || "rss,sitemap").split(",").map((s) => s.trim().toLowerCase());
+  const mode = String(req.query.mode || "rss,sitemap").split(",").map(s => s.trim().toLowerCase());
   const out = {};
   try {
     if (typeof ingestRSS === "function" && mode.includes("rss")) out.rss = await ingestRSS();
@@ -318,11 +320,11 @@ app.all("/admin/ingest/run", async (req, res) => {
     if (!Object.keys(out).length) return res.status(501).json({ ok: false, error: "ingest not available" });
     res.json({ ok: true, result: out });
   } catch (e) {
-    console.error("ingest error", e);
+    log.error("ingest error", e?.message || e);
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-// ===== Start =====
+// ====== START ======
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("True Live up on", PORT));
