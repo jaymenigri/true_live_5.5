@@ -1,4 +1,4 @@
-// server.js — True Live v2.2.0 (ESM)
+// server.js — True Live v2.2.2 (ESM)
 
 import express from "express";
 import { sendWhatsApp } from "./services/twilioClient.js";
@@ -33,13 +33,13 @@ function ymd() { return new Date().toISOString().slice(0, 10); }
 function prune() { const cut = now() - DAY; for (const [k, v] of SESSIONS) if ((v.last || 0) < cut) SESSIONS.delete(k); }
 function histGet(k) { prune(); return SESSIONS.get(k)?.msgs || []; }
 function histPush(k, role, content) {
-  const s = SESSIONS.get(k) || { msgs: [], last: 0, countDay: { day: ymd(), count: 0 }, off: { streak: 0, since: 0, cooldownUntil: 0, outsGiven: 0 } };
+  const s = SESSIONS.get(k) || { msgs: [], last: 0, countDay: { day: ymd(), count: 0 }, off: { streak: 0, since: 0, cooldownUntil: 0, outsGiven: 0 }, subject: "" };
   s.msgs = s.msgs.concat([{ role, content }]).slice(-10);
   s.last = now();
   SESSIONS.set(k, s);
 }
 function incCount(k) {
-  const s = SESSIONS.get(k) || { msgs: [], last: 0, countDay: { day: ymd(), count: 0 }, off: { streak: 0, since: 0, cooldownUntil: 0, outsGiven: 0 } };
+  const s = SESSIONS.get(k) || { msgs: [], last: 0, countDay: { day: ymd(), count: 0 }, off: { streak: 0, since: 0, cooldownUntil: 0, outsGiven: 0 }, subject: "" };
   const d = ymd();
   if (s.countDay.day !== d) s.countDay = { day: d, count: 0 };
   s.countDay.count++;
@@ -49,14 +49,14 @@ function incCount(k) {
 }
 function sessionGet(id) {
   prune();
-  return SESSIONS.get(id) || { msgs: [], last: 0, countDay: { day: ymd(), count: 0 }, off: { streak: 0, since: 0, cooldownUntil: 0, outsGiven: 0 } };
+  return SESSIONS.get(id) || { msgs: [], last: 0, countDay: { day: ymd(), count: 0 }, off: { streak: 0, since: 0, cooldownUntil: 0, outsGiven: 0 }, subject: "" };
 }
 function sessionSet(id, s) { s.last = now(); SESSIONS.set(id, s); }
 
 // ===== Off-topic manager (configurável por env) =====
 const OFF_MAX = Number(OFFTOPIC_MAX || "3");                 // quantas fora de escopo seguidas até cooldown
 const OFF_COOLDOWN_MIN = Number(OFFTOPIC_COOLDOWN_MIN || "15");
-const ALLOW_OUTSIDE_FIRST_N = Number(ANSWER_OUTSIDE_CORPUS_FIRST_N || "0"); // ex.: 0 = nunca responder fora de escopo
+const ALLOW_OUTSIDE_FIRST_N = Number(ANSWER_OUTSIDE_CORPUS_FIRST_N || "0"); // 0 = nunca responder fora de escopo
 
 function updateOffTopic(id, isInScope) {
   const s = sessionGet(id);
@@ -68,9 +68,7 @@ function updateOffTopic(id, isInScope) {
     const t = now();
     s.off.streak += 1;
     if (!s.off.since) s.off.since = t;
-    if (s.off.streak >= OFF_MAX) {
-      s.off.cooldownUntil = t + OFF_COOLDOWN_MIN * 60 * 1000;
-    }
+    if (s.off.streak >= OFF_MAX) s.off.cooldownUntil = t + OFF_COOLDOWN_MIN * 60 * 1000;
   }
   sessionSet(id, s);
   return s.off;
@@ -78,6 +76,25 @@ function updateOffTopic(id, isInScope) {
 function isInCooldown(id) {
   const s = sessionGet(id);
   return s.off.cooldownUntil && now() < s.off.cooldownUntil;
+}
+
+// ===== Sujeito do contexto (para perguntas pronominais) =====
+function isPronounFollowUp(q) {
+  const t = (q || "").toLowerCase().trim();
+  return /^(quem|qual|quais|onde|quando|como|ele|ela|dele|dela|seu|sua|filhos?|esposa|marido|pais)\b/.test(t);
+}
+function extractSubjectFromTitle(title = "") {
+  const raw = (title || "").split("—")[0].trim();
+  return raw || title || "";
+}
+function getSessionSubject(id) {
+  const s = sessionGet(id);
+  return s.subject || "";
+}
+function setSessionSubject(id, subject) {
+  const s = sessionGet(id);
+  s.subject = subject;
+  sessionSet(id, s);
 }
 
 // ===== Utils =====
@@ -103,7 +120,7 @@ function systemPrompt(lang, scope) {
 ${scope === "in" ? "(Pergunta classificada como DENTRO do domínio.)" : "(Pergunta classificada como FORA/INDEFINIDA.)"}`;
 }
 
-// Limpa QUALQUER rodapé que o modelo tente colar (PT/EN/ES/HE)
+// Limpa rodapés que o modelo tente colar (PT/EN/ES/HE)
 function cleanModelFooter(txt) {
   if (!txt) return txt;
   return txt
@@ -116,7 +133,7 @@ function cleanModelFooter(txt) {
 }
 
 // ===== Rotas públicas =====
-app.get("/", (_req, res) => res.send("True Live v2.2.0 running."));
+app.get("/", (_req, res) => res.send("True Live v2.2.2 running."));
 app.get("/health", (_req, res) => res.send("ok"));
 
 // ===== Rotas admin =====
@@ -158,19 +175,16 @@ app.post("/twilio/whatsapp", async (req, res) => {
     const mediaType = (req.body.MediaContentType0 || "").toLowerCase();
 
     const lang = detectLang(body);
-let scope = classifyScope(body);
 
-// se escopo sair "fora", mas a pergunta for curta e houver contexto anterior dentro do escopo → herda
-if (scope !== "in") {
-  const low = (body || "").toLowerCase();
-  if (/^(quem|qual|onde|quando|como|ele|ela|dele|dela|seu|sua)/.test(low)) {
-    const hist = histGet(from);
-    const lastIn = [...hist].reverse().find(m => m.role === "user" && classifyScope(m.content) === "in");
-    if (lastIn) {
-      scope = "in"; // herda escopo
+    // ===== Classificação de escopo + herança em pergunta pronominal =====
+    let scope = classifyScope(body);
+    if (scope !== "in") {
+      if (isPronounFollowUp(body)) {
+        const hist = histGet(from);
+        const lastIn = [...hist].reverse().find(m => m.role === "user" && classifyScope(m.content) === "in");
+        if (lastIn) scope = "in";
+      }
     }
-  }
-}
 
     // Rate limit diário
     const used = incCount(from);
@@ -260,9 +274,19 @@ if (scope !== "in") {
       }
     }
 
+    // ===== Query efetiva para o RAG (injeta sujeito se for pronominal) =====
+    let effectiveQuery = userText;
+    const subjectInSession = getSessionSubject(from);
+    if (scope === "in" && isPronounFollowUp(userText) && subjectInSession) {
+      effectiveQuery = `${subjectInSession}. ${userText}`;
+    }
+    console.log("Effective query:", effectiveQuery);
+
     // ===== RAG =====
     let ctx = { chunks: [], pass: false, chunksPassing: [] };
-    if (scope === "in") ctx = await retrieveHybrid(userText, 6, detectRecencyIntent(userText));
+    if (scope === "in") {
+      ctx = await retrieveHybrid(effectiveQuery, 6, detectRecencyIntent(effectiveQuery));
+    }
 
     // ===== Geração =====
     const hist = histGet(from);
@@ -270,13 +294,18 @@ if (scope !== "in") {
     let fontesList = [];
 
     if (ctx.pass) {
-      // com acervo
       const chosen = ctx.chunksPassing;
+
+      // Atualiza sujeito da conversa a partir do top-1
+      const topTitle = chosen?.[0]?.title || "";
+      const subj = extractSubjectFromTitle(topTitle);
+      if (subj) setSessionSubject(from, subj);
+
       reply = await generateResponseWithHistory(systemPrompt(lang, scope), hist, userText, chosen);
       reply = cleanModelFooter(reply);
       fontesList = Array.from(new Set(chosen.map(c => `${c.source}${c.date ? " " + c.date : ""}`))).slice(0, 6);
     } else {
-      // fallback controlado (sem chunks) — útil mesmo quando a pessoa citada não estiver no acervo
+      // fallback controlado
       const fallbackPrompt =
         lang === "es" ? `Si no encuentras información sobre la persona específica mencionada, dilo en una línea y enseguida responde el tema de fondo con hechos y definiciones fiables (por ejemplo, definición jurídica de genocidio, definición de la IHRA). No agregues etiquetas ni "Fuentes:".`
         : lang === "en" ? `If you can't find information about the specific person mentioned, say so in one short line and then answer the underlying topic with reliable facts (e.g., legal definition of genocide, IHRA definition). Do not add labels or "Sources:".`
