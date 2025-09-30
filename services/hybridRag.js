@@ -1,229 +1,241 @@
-// services/hybridRag.js — v2.6 (final)
-// - Lê corpus de /corpus/corpus.json aceitando variações de chaves:
-//   text|content|body|snippet, title|name|headline, source|url, date|published_at
-// - Busca híbrida TF-IDF/cosseno + boost de título
-// - Limiar “elástico”: se nada passar mas houver match forte de título, considera pass
-// - Resolver de follow-up (pronome “dele/dela/ele/ela” etc.) usando prevSubject
-// - Snippets com rede de segurança: nunca vazio quando pass=true
-
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
+import natural from "natural";
+import { openai, withTimeout } from "./openaiClient.js";
+import { CONFIG } from "../config/appConfig.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+/* =======================
+   Carregamento de dados
+   ======================= */
+const __dir = path.resolve();
+const corpusPath = path.join(__dir, "corpus", "corpus.json");
+const aliasesPath = path.join(__dir, "config", "aliases.json");
+const fontesPath  = path.join(__dir, "data", "fontes.json");
 
-const CORPUS_PATH = path.join(__dirname, "..", "corpus", "corpus.json");
-const BASE_THRESHOLD = parseFloat(process.env.RAG_THRESHOLD || "0.5");
+const corpus = safeJson(corpusPath, []);
+const aliasesRaw = safeJson(aliasesPath, {});
+const fontes  = safeJson(fontesPath, { sources:{} });
 
-// --------------------------
-// utilidades
-// --------------------------
-function norm(s = "") {
-  return (s || "")
-    .toString()
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
-}
-
-function tokenize(s = "") {
-  return norm(s).split(/[^a-z0-9]+/).filter(w => w.length >= 2);
-}
-
-function cosine(aVec, bVec) {
-  let dot = 0, a2 = 0, b2 = 0;
-  const keys = new Set([...Object.keys(aVec), ...Object.keys(bVec)]);
-  for (const k of keys) {
-    const av = aVec[k] || 0;
-    const bv = bVec[k] || 0;
-    dot += av * bv;
-    a2 += av * av;
-    b2 += bv * bv;
-  }
-  if (!a2 || !b2) return 0;
-  return dot / (Math.sqrt(a2) * Math.sqrt(b2));
-}
-
-// --------------------------
-// leitura do corpus (flexível)
-// --------------------------
-function readJSONFlexible(p) {
+function safeJson(p, fallback) {
   try {
-    const raw = fs.readFileSync(p, "utf8");
-    const arr = JSON.parse(raw);
-
-    return (arr || []).map((item, idx) => {
-      const title = item.title || item.name || item.headline || `corpus ${idx}`;
-      const text =
-        item.text || item.content || item.body || item.snippet || "";
-      const source = item.source || item.url || "corpus";
-      const date = item.date || item.published_at || "";
-
-      return {
-        id: item.id || `corpus-${idx}`,
-        title: String(title).trim(),
-        text: String(text).trim(),
-        source: String(source).trim(),
-        date: String(date).trim(),
-      };
-    }).filter(x => x.text && x.title);
-  } catch (e) {
-    console.error("[ERROR] hybridRag: failed to read corpus:", e.message);
-    return [];
+    return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch {
+    return fallback;
   }
 }
 
-const CORPUS = readJSONFlexible(CORPUS_PATH);
+/* =======================
+   Normalização & Aliases
+   ======================= */
 
-// --------------------------
-// índice TF-IDF simples
-// --------------------------
-const DOCS = CORPUS.map(d => ({
-  ...d,
-  tokens: tokenize(d.title + " " + d.text)
-}));
-
-const DF = {};
-for (const d of DOCS) {
-  const seen = new Set(d.tokens);
-  for (const t of seen) DF[t] = (DF[t] || 0) + 1;
+// Normalização base: minúsculas, sem acentos, hifens/underscores → espaço, espaços compactados
+function baseNormalize(s="") {
+  return String(s)
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
-const N = Math.max(1, DOCS.length);
 
-function tfidfVector(tokens) {
-  const tf = {};
-  for (const t of tokens) tf[t] = (tf[t] || 0) + 1;
-  const vec = {};
-  for (const [t, f] of Object.entries(tf)) {
-    const idf = Math.log((N + 1) / ((DF[t] || 0) + 1)) + 1;
-    vec[t] = (f / tokens.length) * idf;
+// Canon: chave SEM acento/ hífen (espaços simples)
+function canonKey(k) {
+  return baseNormalize(k);
+}
+
+// Precompile: para cada variação, criamos um RegExp com \b... \b (word boundary)
+function compileAliases(aliasesObj) {
+  const compiled = []; // [{ canon:"ben gurion", re: RegExp }]
+  // ordenar canônicos por tamanho decrescente (evita colisões tipo "paula ben gurion" vs "ben gurion")
+  const entries = Object.entries(aliasesObj).map(([k, arr]) => [canonKey(k), arr || []])
+    .sort((a,b)=>b[0].length - a[0].length);
+
+  for (const [canon, vars] of entries) {
+    const all = new Set([canon, ...vars.map(baseNormalize)]);
+    for (const alt of all) {
+      // escapar regex
+      const esc = alt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      // \b não funciona bem com caracteres RTL; como nosso normalize remove acentos e usa latim básico, OK.
+      compiled.push({ canon, re: new RegExp(`\\b${esc}\\b`, "g") });
+    }
   }
-  return vec;
+  return compiled;
 }
 
-const DOC_VECS = DOCS.map(d => tfidfVector(d.tokens));
+const ALIASES = compileAliases(aliasesRaw);
 
-// --------------------------
-// follow-up resolver (pronome “dele/dela/ele/ela” etc.)
-// --------------------------
-function resolveFollowUp(query, prevSubject) {
-  if (!prevSubject) return query;
-  const qn = norm(query);
-  const needs = /\b(ela|ele|dela|dele|seu|sua|deles|delas)\b/.test(qn);
-  if (!needs) return query;
-  return `${query} (sobre ${prevSubject})`;
+// Aplica todos os aliases sobre um texto já normalizado
+function applyAliasesNormalized(normText) {
+  let out = normText;
+  for (const { canon, re } of ALIASES) {
+    out = out.replace(re, canon);
+  }
+  return out;
 }
 
-// --------------------------
-// pesquisa híbrida
-// --------------------------
-function searchInternal(query, { threshold = BASE_THRESHOLD, prevSubject = null, lang = "pt" } = {}) {
-  const resolvedQuery = resolveFollowUp(query, prevSubject);
-  const qTokens = tokenize(resolvedQuery);
-  const qVec = tfidfVector(qTokens);
+/* =======================
+   Indexação TF-IDF (docs normalizados)
+   ======================= */
 
-  // score por cosseno + boost por título (match literal no título)
-  const scored = DOCS.map((d, i) => {
-    const base = cosine(qVec, DOC_VECS[i]);
-    const titleHit = norm(d.title).includes(norm(prevSubject || "")) ||
-      norm(d.title).includes(norm(query));
-    const titleBoost = titleHit ? 0.12 : 0; // boost leve
-    return { doc: d, score: Math.min(1, base + titleBoost) };
-  })
-  .filter(x => x.score > 0)
-  .sort((a, b) => b.score - a.score);
+const tfidf = new natural.TfIdf();
+const docsOriginal = corpus.map(e => `${e.title || ""}\n${e.text || ""}`);
 
-  const top = scored.slice(0, 6).map(s => ({
-    ...s.doc,
-    score: s.score
-  }));
+// Versões normalizadas dos docs (melhora o match lexical)
+const docsNorm = docsOriginal.map(d => applyAliasesNormalized(baseNormalize(d)));
+docsNorm.forEach(d => tfidf.addDocument(d));
 
-  // limiar elástico: se ninguém passou, mas top >= 0.38 e título combina, aceita
-  const passed = top.length && (top[0].score >= threshold ||
-    (top[0].score >= Math.min(0.38, threshold) &&
-      norm(top[0].title).includes(norm(prevSubject || ""))));
-
-  const scope = passed ? "in" : "out";
-
-  return {
-    pass: passed,
-    score: top[0]?.score || 0,
-    scope,
-    resolvedQuery,
-    topChunks: top
-  };
+/* =======================
+   Utilidades Embeddings
+   ======================= */
+async function embed(texts) {
+  const res = await withTimeout(
+    openai.embeddings.create({
+      model: CONFIG.OPENAI_EMBED_MODEL,
+      input: texts
+    }),
+    CONFIG.OPENAI_TIMEOUT_MS
+  );
+  return res.data.map(e => e.embedding);
 }
 
-// --------------------------
-// snippets com rede de segurança (nunca vazio quando pass=true)
-// --------------------------
-function buildSnippets(topChunks, query, maxSnippets = 4) {
-  const snippets = [];
+function cosine(a,b){
+  let dot=0,na=0,nb=0;
+  for (let i=0;i<a.length;i++){ dot+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; }
+  return dot/(Math.sqrt(na)*Math.sqrt(nb)+1e-9);
+}
 
-  for (const ch of topChunks) {
-    const text = (ch.text || "").trim();
-    if (!text) continue;
+function normalizeScoreTFIDF(s){ return Math.min(1, s/10); }
 
-    // separação por sentenças (A-Z e acentos)
-    const sentences = text
-      .replace(/\s+/g, " ")
-      .split(/(?<=[.!?])\s+(?=[A-ZÀ-ÖØ-Ý])/u)
-      .map(s => s.trim())
-      .filter(Boolean);
+/* =======================
+   Rankeamento híbrido
+   ======================= */
 
-    const q = (query || "").toLowerCase();
-    const terms = q.split(/\W+/).filter(w => w.length >= 3);
-    const hits = sentences.filter(s =>
-      terms.some(t => s.toLowerCase().includes(t))
-    );
+function tfidfTopK(normQuery, k = 6) {
+  const scores = [];
+  tfidf.tfidfs(normQuery, (i, v) => scores.push([i, v]));
+  scores.sort((a,b)=>b[1]-a[1]);
+  return scores.slice(0,k).map(([i,v])=>({index:i,score:v}));
+}
 
-    let chosen = [];
-    if (hits.length) chosen = hits.slice(0, 2);
-    else chosen = sentences.slice(0, 2);
+/* =======================
+   Hint de fontes (fallback)
+   ======================= */
+function fontesHintHosts(max=10) {
+  try {
+    return (fontes.sources?.websites || [])
+      .map(f => new URL(f.url).hostname.replace(/^www\./,""))
+      .slice(0, max)
+      .join(", ");
+  } catch { return ""; }
+}
 
-    if (!chosen.length) chosen = [text.slice(0, 320)];
+/* =======================
+   Resposta principal
+   ======================= */
 
-    snippets.push({
-      title: ch.title || "corpus",
-      text: chosen.join(" "),
-      date: ch.date || "",
-      score: ch.score ?? 0
-    });
-
-    if (snippets.length >= maxSnippets) break;
+export async function answerWithRAG(userQuery, lang="pt") {
+  // 0) Guard-clauses
+  if (!Array.isArray(corpus) || corpus.length === 0) {
+    return { kind:"fallback", text: tagOutside("Nenhum item do acervo carregado.", lang), score: 0 };
   }
 
-  if (!snippets.length && topChunks.length) {
-    const ch0 = topChunks[0];
-    snippets.push({
-      title: ch0.title || "corpus",
-      text: (ch0.text || "").trim().slice(0, 320),
-      date: ch0.date || "",
-      score: ch0.score ?? 0
-    });
+  // 1) Normalizar e aplicar aliases na QUERY
+  const qNorm = applyAliasesNormalized(baseNormalize(userQuery));
+
+  // 2) TF-IDF no espaço normalizado
+  const top = tfidfTopK(qNorm, 6);
+  const candidateIdxs = top.map(t => t.index);
+
+  // 3) Preparar textos para embeddings (usar originais, que preservam contexto/semântica)
+  const candTexts = candidateIdxs.map(i => docsOriginal[i] || "");
+  const embeds = await safeEmbed([qNorm, ...candTexts]); // usamos qNorm como texto da query a embedar
+  if (!embeds) {
+    // Se embeddings falhar, cair só no TF-IDF
+    const bestTF = top[0];
+    if (bestTF && normalizeScoreTFIDF(bestTF.score) >= CONFIG.RAG_THRESHOLD) {
+      return respondFromCorpus(bestTF.index, lang, normalizeScoreTFIDF(bestTF.score));
+    }
+    return await respondFallback(userQuery, lang, bestTF?.score || 0);
   }
 
-  return snippets;
-}
+  const qEmb = embeds[0];
+  const cEmb = embeds.slice(1);
+  const semScores = cEmb.map(e => cosine(qEmb, e));
 
-// --------------------------
-// API pública
-// --------------------------
-export async function search({ query, threshold = BASE_THRESHOLD, prevSubject = null, lang = "pt" } = {}) {
-  if (!query || !DOCS.length) {
-    return { pass: false, score: 0, scope: "out", snippets: [], topChunks: [], resolvedQuery: query || "" };
+  // 4) Score combinado (50/50 TF-IDF normalizado + semântico)
+  const combined = top.map((t, i) => ({
+    index: t.index,
+    score: 0.5*normalizeScoreTFIDF(t.score) + 0.5*semScores[i]
+  })).sort((a,b)=>b.score-a.score);
+
+  const best = combined[0];
+  if (best && best.score >= CONFIG.RAG_THRESHOLD) {
+    return respondFromCorpus(best.index, lang, best.score);
   }
 
-  const res = searchInternal(query, { threshold, prevSubject, lang });
-  const snippets = res.pass ? buildSnippets(res.topChunks, res.resolvedQuery, 4) : [];
-
-  return {
-    ...res,
-    snippets
-  };
+  // 5) Fallback garantido
+  return await respondFallback(userQuery, lang, best?.score || 0);
 }
 
-export function corpusSize() {
-  return DOCS.length;
+/* =======================
+   Helpers de resposta
+   ======================= */
+
+function tagInside(lang) {
+  return (lang==="pt") ? "Baseado no acervo"
+       : (lang==="es") ? "Basado en el acervo"
+                       : "Based on the corpus";
+}
+
+function tagOutsideText(lang) {
+  return (lang==="pt") ? "Resposta geral (fora do acervo)"
+       : (lang==="es") ? "Respuesta general (fuera del acervo)"
+                       : "General answer (outside the corpus)";
+}
+
+function tagOutside(body, lang) {
+  return `${tagOutsideText(lang)}:\n${body}`;
+}
+
+function respondFromCorpus(idx, lang, score=0) {
+  const entry = corpus[idx];
+  const fonteTxt = entry?.sources?.length
+    ? "\n\nFontes: " + entry.sources.map(s => `• ${s}`).join("\n")
+    : "";
+  const text = `${tagInside(lang)}:\n${(entry?.text || "").trim()}${fonteTxt}`;
+  return { kind: "corpus", text, score };
+}
+
+async function respondFallback(userQuery, lang, score=0) {
+  const sys = {
+    pt: "Você é um assistente direto. Responda em português em até 1200 caracteres. Se não souber com certeza, dê a melhor resposta geral.",
+    es: "Eres un asistente directo. Responde en español en hasta 1200 caracteres.",
+    en: "You are a direct assistant. Answer in English in up to 1200 characters."
+  }[lang] || "Você é um assistente direto. Responda em português em até 1200 caracteres.";
+
+  const hosts = fontesHintHosts(10);
+  const messages = [
+    { role: "system", content: sys + (hosts ? ` Prefira fatos consistentes com: ${hosts}.` : "") },
+    { role: "user", content: userQuery }
+  ];
+
+  const comp = await withTimeout(
+    openai.chat.completions.create({
+      model: CONFIG.OPENAI_MODEL,
+      messages,
+      temperature: 0.4
+    }),
+    CONFIG.OPENAI_TIMEOUT_MS
+  );
+
+  const txt = comp.choices?.[0]?.message?.content?.trim() || "OK.";
+  return { kind:"fallback", text: tagOutside(txt, lang), score };
+}
+
+/* =======================
+   Fail-safe de embeddings
+   ======================= */
+async function safeEmbed(texts){
+  try { return await embed(texts); }
+  catch { return null; }
 }
