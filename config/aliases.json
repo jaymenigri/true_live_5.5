@@ -1,15 +1,9 @@
 {
   "ben gurion": ["ben-gurion", "david ben gurion", "david ben-gurion", "ben guríon", "ben guiron"],
-  "golda meir": ["golda meyr", "golda meier", "golda", "primeira-ministra de israel 1969-1974"],
+  "golda meir": ["golda meyr", "golda meier", "golda"],
   "itzhak rabin": ["yitzhak rabin", "itzhak robin", "yitzhak", "rabin"],
   "shimon peres": ["shimón peres", "shimon péres", "peres"],
   "menachem begin": ["menáchem begin", "begin", "menachem béguin"],
-  "levi eshkol": ["levy eshkol", "eshkol"],
-  "yitzhak shamir": ["itzhak shamir", "shamir"],
-  "ariel sharon": ["ariel charon", "sharon"],
-  "ehud barak": ["ehud barack", "barak"],
-  "ehud olmert": ["olmert"],
-  "herzog": ["isaac herzog", "yitzhak herzog"],
 
   "shoah": ["holocausto", "holocaust", "shoá", "sho’a"],
   "antisemitismo": ["antissemitismo", "anti-semitismo", "antisemitism", "judeofobia"],
@@ -39,7 +33,6 @@
   "war of independence": ["guerra da independência de israel", "guerra de 1948", "1948 war"],
 
   "genocidio": ["genocídio", "genocide"],
-  "antisemita": ["anti-semita", "antissemitas"],
   "colonia": ["colônia", "settlement", "assentamento"],
   "colonos": ["assentados", "settlers"],
 
@@ -52,7 +45,6 @@
   "ben-gurion": ["ben gurion"],
   "david ben-gurion": ["david ben gurion"],
   "yitzhak": ["itzhak"],
-  "shoá": ["shoah"],
   "holocausto": ["shoah"],
   "zionismo": ["sionismo"]
 }
