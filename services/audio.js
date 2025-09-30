@@ -1,11 +1,11 @@
-// services/audio.js
 import axios from "axios";
 import { openai, withTimeout } from "./openaiClient.js";
 import { CONFIG } from "../config/appConfig.js";
 import { toFile } from "openai/uploads";
 
-/** Baixa áudio de mensagem do WhatsApp (Twilio) e transcreve.
- *  Em caso de erro (404/401/timeouts/etc), faz log e retorna null.
+/**
+ * Baixa áudio do webhook WhatsApp (Twilio) e transcreve.
+ * Se der erro (404/401/timeout/formato), LOGA e retorna null (não derruba o fluxo).
  */
 export async function maybeTranscribeWhatsApp(reqBody) {
   try {
@@ -23,7 +23,8 @@ export async function maybeTranscribeWhatsApp(reqBody) {
         username: process.env.TWILIO_ACCOUNT_SID,
         password: process.env.TWILIO_AUTH_TOKEN
       },
-      validateStatus: () => true // nós mesmos tratamos status
+      // tratamos status manualmente
+      validateStatus: () => true
     });
 
     if (resp.status !== 200) {
@@ -47,7 +48,9 @@ export async function maybeTranscribeWhatsApp(reqBody) {
     if (!text) console.warn("[AUDIO] transcrição vazia");
     return text || null;
   } catch (e) {
-    try { console.warn("[AUDIO] erro, ignorando e seguindo com texto:", e?.message || e); } catch {}
+    try {
+      console.warn("[AUDIO] erro, ignorando e seguindo com texto:", e?.message || e);
+    } catch {}
     return null;
   }
 }
