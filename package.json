@@ -1,25 +1,20 @@
 {
-  "name": "true-live-whatsapp",
-  "version": "2.1.0",
-  "description": "True Live \u2013 WhatsApp AI assistant (Node.js/Express/Twilio/OpenAI) with Hybrid RAG + Ingestion",
+  "name": "truelive-5-6-mvp",
+  "version": "1.0.0",
   "main": "server.js",
   "type": "module",
+  "engines": { "node": ">=18.x" },
   "scripts": {
     "start": "node server.js"
   },
-  "engines": {
-    "node": "20.x"
-  },
   "dependencies": {
     "axios": "^1.7.2",
+    "body-parser": "^1.20.2",
     "express": "^4.19.2",
-    "openai": "^4.59.0",
-    "twilio": "^5.2.3",
-    "rss-parser": "^3.13.0",
-    "fast-xml-parser": "^4.5.0",
-    "jsdom": "^24.1.0",
-    "@mozilla/readability": "^0.5.0",
-    "pdf-parse": "^1.1.1",
-    "lunr": "^2.3.9"
+    "natural": "^6.5.0",
+    "openai": "^4.54.0",
+    "pg": "^8.11.3",
+    "twilio": "^5.2.4",
+    "uuid": "^9.0.1"
   }
 }
