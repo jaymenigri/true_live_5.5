@@ -1,256 +1,228 @@
-// services/hybridRag.js — v2.5.2 (estável)
-// - Carrega corpus de: corpus/corpus.json OR data/corpus.json OR ./corpus.json
-// - Aceita chaves: text|content|body|snippet, title|name|headline, source|url, date|published_at
-// - Aliases opcionais (config/aliases.json)
-// - Busca TF-IDF + cosseno, bônus de título e leve bônus de recência
-// - Divisão de sentenças SEM lookbehind (compatível com Node 20/Heroku)
-// - Compatível com server.js v2.6.0 (usa search() + loadCorpus())
+// services/hybridRag.js — v2.6 (final)
+// - Carrega corpus de ./corpus/corpus.json (campos flexíveis)
+// - Aliases opcionais (./config/aliases.json)
+// - Busca híbrida (TF-IDF + cosseno) com boost de título
+// - Coref: reescreve perguntas relacionais com base no último sujeito
+// - Limiar adaptativo (se houver forte match de título)
+// - Sem lookbehind em regex (compatível Node 20.x)
 
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 
-const LOG_LEVEL = (process.env.LOG_LEVEL || "info").toLowerCase();
-const DEFAULT_THRESHOLD = Number(process.env.RAG_THRESHOLD ?? 0.4);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-const log = {
-  info:  (...a) => { if (["debug","info"].includes(LOG_LEVEL)) console.log("[INFO] ", ...a); },
-  debug: (...a) => { if (LOG_LEVEL === "debug") console.log("[DEBUG]", ...a); },
-  warn:  (...a) => console.warn("[WARN] ", ...a),
-  error: (...a) => console.error("[ERROR]", ...a),
-};
+const CORPUS_FILE = path.join(__dirname, "..", "corpus", "corpus.json");
+const ALIASES_FILE = path.join(__dirname, "..", "config", "aliases.json");
 
-const ROOT = process.cwd();
-const CORPUS_CANDIDATES = [
-  path.join(ROOT, "corpus", "corpus.json"),
-  path.join(ROOT, "data", "corpus.json"),
-  path.join(ROOT, "corpus.json"),
-];
-const ALIASES_PATH = path.join(ROOT, "config", "aliases.json");
-
-let STATE = {
-  docs: [],
-  aliases: {},
-  loadedAt: 0,
-  originPath: null,
-};
-
-// ---------- util ----------
-const nowTs = () => Date.now();
-const toArr = (v) => (Array.isArray(v) ? v : v ? [v] : []);
-
-function readJsonMaybe(p) {
+// ----------------------- utilidades --------------------------------
+function readJSONSafe(file) {
   try {
-    if (fs.existsSync(p)) {
-      const raw = fs.readFileSync(p, "utf8");
-      return JSON.parse(raw);
-    }
-  } catch (e) {
-    log.warn("Failed to read json:", p, e?.message);
+    const raw = fs.readFileSync(file, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return null;
   }
-  return null;
 }
 
-function pickFirst(obj, keys, fallback = "") {
-  for (const k of keys) if (obj && obj[k] != null) return String(obj[k]);
-  return fallback;
+function normalizeDoc(raw, idx) {
+  const id = raw.id || `doc-${idx + 1}`;
+  const title = raw.title || raw.name || raw.headline || "";
+  const text = raw.text || raw.content || raw.body || raw.snippet || "";
+  const source = raw.source || raw.url || "corpus";
+  const date = raw.date || raw.published_at || "";
+  return { id, title, text, source, date };
 }
 
-function normalizeDoc(raw) {
-  const title  = pickFirst(raw, ["title","name","headline","titulo","nome"], "");
-  const text   = pickFirst(raw, ["text","content","body","snippet","descricao"], "");
-  const source = pickFirst(raw, ["source","url","fonte"], "corpus");
-  const date   = pickFirst(raw, ["date","published_at","data"], null);
-  const id     = raw?.id ?? `${(title || "").slice(0, 40)}-${Math.random().toString(36).slice(2, 7)}`;
-  if (!text && !title) return null;
-  return { id, title: String(title || source).trim(), text: String(text || "").trim(), source, date };
-}
-
-function loadAliasesInternal() {
-  try {
-    if (fs.existsSync(ALIASES_PATH)) {
-      const raw = fs.readFileSync(ALIASES_PATH, "utf8");
-      const obj = JSON.parse(raw);
-      if (obj && typeof obj === "object") {
-        log.info("Aliases loaded:", Object.keys(obj).length);
-        return obj;
-      }
-    }
-  } catch (e) {
-    log.warn("Failed to load aliases:", e?.message);
-  }
-  return {};
-}
-
-export function loadCorpus() {
-  let found = null;
-  let raw = null;
-  for (const p of CORPUS_CANDIDATES) {
-    const j = readJsonMaybe(p);
-    if (j) { found = p; raw = j; break; }
-  }
-  const arr = raw ? (Array.isArray(raw) ? raw : toArr(raw)) : [];
-  const docs = arr.map(normalizeDoc).filter(Boolean);
-  STATE = {
-    docs,
-    aliases: loadAliasesInternal(),
-    loadedAt: nowTs(),
-    originPath: found,
-  };
-  if (found) log.info(`Corpus loaded: ${docs.length} items from ${found}`);
-  else log.info("Corpus NOT found. Checked:", CORPUS_CANDIDATES.join(" | "));
-  return STATE;
-}
-
-// lazy load
-if (STATE.docs.length === 0) loadCorpus();
-
-// ---------- texto/tokenização ----------
-function normalize(str) {
-  return (str || "")
+function tokenize(s) {
+  return (s || "")
     .toLowerCase()
-    .normalize("NFKD")
-    .replace(/[^\p{Letter}\p{Number}\s-]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9áéíóúãõñçü\- ]/gi, " ")
+    .split(/\s+/)
+    .filter(Boolean);
 }
 
-function tokenize(s) { return normalize(s).split(" ").filter(Boolean); }
-
-function escapeReg(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-
-function applyAliases(q, aliases) {
-  if (!aliases || !Object.keys(aliases).length) return q;
-  let out = ` ${q} `;
-  for (const [needle, repl] of Object.entries(aliases)) {
-    const pattern = new RegExp(`(^|\\W)${escapeReg(needle)}(\\W|$)`, "gi");
-    out = out.replace(pattern, `$1${repl}$2`);
-  }
-  return out.trim();
-}
-
-// ---------- TF-IDF + cosseno ----------
-function buildTf(tokens) {
-  const tf = new Map();
-  for (const t of tokens) tf.set(t, (tf.get(t) || 0) + 1);
-  return tf;
-}
 function cosine(a, b) {
   let dot = 0, na = 0, nb = 0;
-  for (const [k, va] of a.entries()) {
-    const vb = b.get(k) || 0;
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k of keys) {
+    const va = a[k] || 0;
+    const vb = b[k] || 0;
     dot += va * vb;
     na += va * va;
+    nb += vb * vb;
   }
-  for (const [, vb] of b.entries()) nb += vb * vb;
-  return dot === 0 ? 0 : dot / (Math.sqrt(na) * Math.sqrt(nb));
+  if (!na || !nb) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
-function hasTitleHit(query, chunkTitle) {
-  if (!chunkTitle) return false;
-  const q = new Set(tokenize(query));
-  let hits = 0;
-  for (const tok of tokenize(chunkTitle)) if (q.has(tok)) hits++;
-  const tLen = tokenize(chunkTitle).length;
-  return hits >= 2 || (hits >= 1 && tLen <= 3);
+function tf(tokens) {
+  const map = Object.create(null);
+  for (const t of tokens) map[t] = (map[t] || 0) + 1;
+  const out = Object.create(null);
+  const N = tokens.length || 1;
+  for (const k in map) out[k] = map[k] / N;
+  return out;
 }
 
-// ---------- “agora/hoje” ----------
-const NOW_HINTS = ["agora", "hoje", "últimas", "ultimas", "ao vivo", "de hoje", "now", "today", "latest", "recent"];
-function wantsNow(q) { const low=q.toLowerCase(); return NOW_HINTS.some(h=>low.includes(h)); }
+// ---------------------- carregar corpus -----------------------------
+const rawCorpus = Array.isArray(readJSONSafe(CORPUS_FILE)) ? readJSONSafe(CORPUS_FILE) : [];
+export function corpusCount() { return rawCorpus.length; }
+const corpus = rawCorpus.map(normalizeDoc);
 
-// ---------- divisão de sentenças (sem lookbehind) ----------
-function splitIntoSentences(text, maxSentences = 2) {
-  const cleaned = String(text || "").replace(/\s+/g, " ").trim();
-  if (!cleaned) return "";
-  // Divide por padrões finais . ! ? , preservando o delimitador
-  const parts = cleaned.match(/[^.!?]+[.!?]*/g) || [cleaned];
-  return parts.slice(0, Math.max(1, maxSentences)).map(s => s.trim()).join(" ");
+const aliases = readJSONSafe(ALIASES_FILE) || {};
+const aliasPairs = Object.entries(aliases).map(([k, v]) => [k.toLowerCase(), String(v).toLowerCase()]);
+
+console.log(`[INFO] Corpus loaded: ${corpus.length} items.`);
+
+// index simples para título e corpo
+const docs = corpus.map(d => {
+  const titleTok = tokenize(d.title);
+  const textTok = tokenize(d.text);
+  return {
+    ...d,
+    titleTok,
+    textTok,
+    tfTitle: tf(titleTok),
+    tfText: tf(textTok)
+  };
+});
+
+// -------------------- coref / rewrite -------------------------------
+function rewriteWithContext(query, prevSubject, lang = "pt") {
+  if (!prevSubject) return query;
+
+  const q = query.trim();
+
+  const patterns = [
+    // esposa dele
+    { re: /\b(esposa|mulher|cônjuge)\s+dele\b/i, out: `esposa de ${prevSubject}` },
+    { re: /\b(wife)\s+of\s+him\b/i, out: `wife of ${prevSubject}` },
+    { re: /\b(su|suya|esposa)\s+de\s+él\b/i, out: `esposa de ${prevSubject}` },
+
+    // onde ele nasceu / where was he born
+    { re: /\bonde\s+ele\s+nasceu\b/i, out: `onde nasceu ${prevSubject}` },
+    { re: /\bwhere\s+was\s+he\s+born\b/i, out: `where was ${prevSubject} born` },
+    { re: /\bdónde\s+nació\s+él\b/i, out: `dónde nació ${prevSubject}` },
+
+    // quando ele morreu
+    { re: /\bquando\s+ele\s+morreu\b/i, out: `quando morreu ${prevSubject}` },
+    { re: /\bwhen\s+did\s+he\s+die\b/i, out: `when did ${prevSubject} die` },
+    { re: /\bcuándo\s+murió\s+él\b/i, out: `cuándo murió ${prevSubject}` },
+
+    // genérico: dele/dela -> de {prevSubject}
+    { re: /\bdele\b/i, out: `de ${prevSubject}` },
+    { re: /\bdela\b/i, out: `de ${prevSubject}` },
+    { re: /\bhis\b/i, out: `${prevSubject}'s` },
+    { re: /\bher\b/i, out: `${prevSubject}'s` }
+  ];
+
+  let out = q;
+  for (const p of patterns) {
+    out = out.replace(p.re, p.out);
+  }
+
+  // Se a pergunta ficou muito curta e contém “ele/ela”, adiciona o sujeito no final
+  if (/\b(ele|ela|he|she)\b/i.test(out) && out.length < 60) {
+    out = `${out} (${prevSubject})`;
+  }
+  return out;
 }
 
-// ---------- busca principal ----------
-export function search(query, opts = {}) {
-  const { docs, aliases } = STATE.docs.length ? STATE : loadCorpus();
-  const threshold = typeof opts.threshold === "number" ? opts.threshold : DEFAULT_THRESHOLD;
+function applyAliases(text) {
+  let s = text.toLowerCase();
+  for (const [a, b] of aliasPairs) {
+    s = s.replace(new RegExp(`\\b${escapeRegExp(a)}\\b`, "g"), b);
+  }
+  return s;
+}
 
-  const originalQuery = query || "";
-  const qAliased = applyAliases(originalQuery, aliases);
-  const qTokens = tokenize(qAliased);
-  const qTf = buildTf(qTokens);
+function escapeRegExp(x) { return x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
-  const needRecent = wantsNow(qAliased);
+// ------------------------- busca -----------------------------------
+export async function hybridSearch(query, opts = {}) {
+  const lang = opts.lang || "pt";
+  const prevSubject = opts.prevSubject || null;
+  const thr = typeof opts.threshold === "number" ? opts.threshold : 0.4;
 
-  const results = [];
+  const resolvedQuery = rewriteWithContext(query, prevSubject, lang);
+  const qAliased = applyAliases(resolvedQuery);
+  const qTok = tokenize(qAliased);
+  const qTf = tf(qTok);
+
+  let best = [];
   for (const d of docs) {
-    const tText = tokenize(d.text);
-    const tTitle = tokenize(d.title);
+    const scoreTitle = cosine(qTf, d.tfTitle);
+    const scoreText = cosine(qTf, d.tfText);
+    // boost de título
+    const score = scoreText * 0.7 + scoreTitle * 0.3 + Math.min(scoreTitle, 0.25);
+    best.push({ id: d.id, title: d.title, score, source: d.source, date: d.date, text: d.text });
+  }
+  best.sort((a, b) => b.score - a.score);
 
-    const tfText = buildTf(tText);
-    const tfTitle = buildTf(tTitle);
+  const top = best[0] || null;
+  const topScore = top?.score || 0;
 
-    const sText = cosine(qTf, tfText);
-    const sTitle = cosine(qTf, tfTitle);
+  // limiar adaptativo: se o título do top doc aparece no query, afrouxa
+  const titleHit = top?.title ? qAliased.includes(top.title.toLowerCase()) : false;
+  const pass = topScore >= thr || (titleHit && topScore >= Math.max(0.18, thr - 0.15));
 
-    let score = sText * 0.8 + sTitle * 0.9;
-
-    // bônus leve de recência
-    if (needRecent && d.date) {
-      const parsed = Date.parse(d.date);
-      if (!Number.isNaN(parsed)) {
-        const ageDays = Math.max(0, (nowTs() - parsed) / 86400000);
-        const decay = 1 / (1 + ageDays / 365);
-        score *= 0.85 + 0.15 * decay;
-      }
-    }
-
-    // bônus de título
-    if (hasTitleHit(qAliased, d.title)) score += 0.12;
-
-    results.push({
-      id: d.id,
-      title: d.title,
-      text: d.text,
-      source: d.source,
-      date: d.date,
-      score,
-      sText,
-      sTitle
-    });
+  if (!pass) {
+    return { pass: false, resolvedQuery, topScore };
   }
 
-  results.sort((a,b)=>b.score-a.score);
+  // montar resposta com 1–2 frases do texto
+  const snippet = makeSnippet(top.text, qTok);
+  const answer = snippet;
 
-  const top = results.slice(0, 5).map(r => ({
-    ...r,
-    snippet: splitIntoSentences(r.text, 2),
-  }));
+  // “assunto” candidato pro histórico
+  const subject = top.title?.split("—")[0]?.trim() || top.title || null;
 
-  // regra de passagem
-  let pass = top.length > 0 && top[0].score >= threshold;
-
-  // limiar adaptativo (nomes próprios, etc.)
-  if (!pass && top.length) {
-    const b = top[0];
-    if (b.sTitle >= 0.22 || b.score >= Math.min(0.18, threshold * 0.6)) {
-      pass = true;
-    }
-  }
-
-  const sources = Array.from(new Set(top.filter(t=>t.score>0).map(t=>(t.source||"corpus").toString().trim())));
+  const sources = [top.title || top.id].filter(Boolean);
 
   return {
-    pass,
-    chunks: top,
-    sources,
-    debug: {
-      q: qAliased,
-      threshold,
-      best: top[0] ? { title: top[0].title, score: Number(top[0].score.toFixed(3)), sTitle: Number(top[0].sTitle.toFixed(3)) } : null,
-      corpusItems: docs.length,
-      needRecent,
-    }
+    pass: true,
+    resolvedQuery,
+    topScore,
+    topTitle: top.title,
+    subject,
+    answer,
+    sources
   };
 }
 
-// Placeholders para ingest (não usados neste build)
-export async function ingestRSS(){ return { ok:false, note:"not wired in this build" }; }
-export async function ingestSitemap(){ return { ok:false, note:"not wired in this build" }; }
+// split de frases sem lookbehind
+function splitSentences(text = "") {
+  const safe = String(text).replace(/\s+/g, " ").trim();
+  if (!safe) return [];
+  // divide por ponto, interrogação, exclamação seguidos de espaço
+  return safe.split(/([\.!?])\s+/).reduce((acc, part, i, arr) => {
+    if (i % 2 === 0) {
+      const punc = arr[i + 1] || "";
+      acc.push((part + punc).trim());
+    }
+    return acc;
+  }, []).filter(Boolean);
+}
+
+function makeSnippet(fullText, qTokens, maxChars = 550) {
+  const sentences = splitSentences(fullText);
+  if (!sentences.length) return fullText.slice(0, maxChars);
+
+  // prioridade para frases que contêm algum token da query
+  const scores = sentences.map((s) => {
+    const st = tokenize(s);
+    const overlap = st.filter(t => qTokens.includes(t)).length;
+    return { s, overlap };
+  });
+  scores.sort((a, b) => b.overlap - a.overlap);
+
+  const picked = [];
+  for (const item of scores) {
+    picked.push(item.s);
+    if (picked.join(" ").length > maxChars || picked.length >= 2) break;
+  }
+  return picked.join(" ");
+}
