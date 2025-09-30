@@ -1,142 +1,212 @@
 [
   {
+    "id": "herzl-1",
+    "title": "Theodor Herzl — sionismo político",
+    "text": "Theodor Herzl (1860–1904) foi o pai do sionismo político moderno; em 1897 organizou o Primeiro Congresso Sionista em Basileia, defendendo a criação de um Estado judeu.",
+    "source": "corpus",
+    "date": "1897"
+  },
+  {
+    "id": "jabotinsky-1",
+    "title": "Ze'ev Jabotinsky — revisionismo",
+    "text": "Ze'ev Jabotinsky (1880–1940) liderou o sionismo revisionista, defendendo autodefesa judaica e a criação imediata de um Estado judeu.",
+    "source": "corpus",
+    "date": "1930"
+  },
+  {
+    "id": "balfour-1",
+    "title": "Declaração Balfour",
+    "text": "A Declaração Balfour de 1917 expressou apoio britânico à criação de um lar nacional judaico na Palestina, preservando direitos civis e religiosos de comunidades existentes.",
+    "source": "corpus",
+    "date": "1917"
+  },
+  {
+    "id": "un-181-1",
+    "title": "Resolução 181 — Partilha",
+    "text": "A ONU aprovou em 29 de novembro de 1947 a Partilha da Palestina em dois Estados, um judeu e um árabe, com Jerusalém sob regime internacional.",
+    "source": "corpus",
+    "date": "1947-11-29"
+  },
+  {
+    "id": "independence-1",
+    "title": "Independência de Israel",
+    "text": "Em 14 de maio de 1948, David Ben-Gurion proclamou a independência do Estado de Israel; no dia seguinte exércitos árabes invadiram o novo país.",
+    "source": "corpus",
+    "date": "1948-05-14"
+  },
+  {
+    "id": "ben-gurion-1",
+    "title": "David Ben-Gurion — perfil",
+    "text": "David Ben-Gurion (1886–1973) foi o primeiro Primeiro-Ministro de Israel e proclamou a independência em 1948. É considerado o fundador do Estado moderno.",
+    "source": "corpus",
+    "date": "1948"
+  },
+  {
+    "id": "ben-gurion-2",
+    "title": "Família de Ben-Gurion",
+    "text": "Ben-Gurion casou-se com Paula Munweis em 1917; tiveram três filhos: Geula, Amos e Renana.",
+    "source": "corpus",
+    "date": "1917"
+  },
+  {
+    "id": "golda-1",
+    "title": "Golda Meir — perfil",
+    "text": "Golda Meir (1898–1978) foi a primeira mulher a chefiar o governo de Israel (1969–1974), liderando o país durante a Guerra do Yom Kippur.",
+    "source": "corpus",
+    "date": "1969"
+  },
+  {
+    "id": "golda-2",
+    "title": "Golda Meir e o Yom Kippur",
+    "text": "Durante a Guerra do Yom Kippur (1973), Golda Meir aprovou mobilização total; apesar das falhas iniciais, Israel reverteu o curso do conflito.",
+    "source": "corpus",
+    "date": "1973-10"
+  },
+  {
     "id": "rabin-1",
     "title": "Itzhak Rabin — perfil",
-    "text": "Itzhak Rabin (1922–1995) foi general do IDF e serviu como Primeiro‑Ministro de Israel (1974–1977; 1992–1995). Assinou os Acordos de Oslo em 1993, recebendo o Prêmio Nobel da Paz em 1994 ao lado de Shimon Peres e Yasser Arafat.",
+    "text": "Itzhak Rabin (1922–1995) foi general das IDF e Primeiro-Ministro (1974–1977; 1992–1995). Assinou os Acordos de Oslo, recebendo o Nobel da Paz em 1994.",
     "source": "corpus",
-    "date": "1993"
+    "date": "1994"
   },
   {
     "id": "rabin-2",
     "title": "Assassinato de Rabin",
-    "text": "Rabin foi assassinado em 4 de novembro de 1995 por um extremista judeu que se opunha aos Acordos de Oslo. O atentado ocorreu ao final de um comício pela paz em Tel Aviv.",
+    "text": "Em 1995, Rabin foi assassinado em Tel Aviv por um extremista judeu após comício pela paz. O atentado abalou o processo de Oslo.",
     "source": "corpus",
     "date": "1995-11-04"
   },
   {
     "id": "leah-rabin-1",
     "title": "Leah Rabin",
-    "text": "Leah Rabin (1928–2000) foi esposa de Itzhak Rabin. Casaram‑se em 1948 e tiveram dois filhos; Leah tornou‑se ativista pela paz após o assassinato do marido.",
+    "text": "Leah Rabin (1928–2000) foi esposa de Itzhak Rabin e tornou-se ativista pela paz após o assassinato do marido, publicando memórias em 1997.",
     "source": "corpus",
-    "date": "2000"
+    "date": "1997"
   },
   {
-    "id": "golda-1",
-    "title": "Golda Meir — perfil",
-    "text": "Golda Meir (1898–1978) foi a quarta Primeira‑Ministra de Israel (1969–1974) e a primeira mulher no cargo. Participou da fundação do Estado e serviu como Ministra das Relações Exteriores.",
+    "id": "begin-1",
+    "title": "Menachem Begin — perfil",
+    "text": "Menachem Begin (1913–1992), líder do Likud, foi Primeiro-Ministro (1977–1983) e assinou com Anwar Sadat o Tratado de Paz Israel-Egito (1979).",
     "source": "corpus",
-    "date": "1974"
+    "date": "1979"
   },
   {
-    "id": "golda-2",
-    "title": "Golda e a Guerra do Yom Kipur",
-    "text": "Durante a Guerra do Yom Kipur (1973), Golda Meir liderou o governo israelense; apesar das falhas de inteligência iniciais, aprovou a mobilização total e garantiu ponte aérea dos EUA.",
+    "id": "peres-1",
+    "title": "Shimon Peres — perfil",
+    "text": "Shimon Peres (1923–2016) foi Primeiro-Ministro e Presidente de Israel; co-arquitetou os Acordos de Oslo e recebeu o Nobel da Paz em 1994.",
     "source": "corpus",
-    "date": "1973-10"
-  },
-  {
-    "id": "bengurion-1",
-    "title": "David Ben‑Gurion — perfil",
-    "text": "David Ben‑Gurion (1886–1973) foi líder sionista e o primeiro Primeiro‑Ministro de Israel. Proclamou a independência do Estado em 14 de maio de 1948.",
-    "source": "corpus",
-    "date": "1948-05-14"
-  },
-  {
-    "id": "bengurion-2",
-    "title": "Família de Ben‑Gurion",
-    "text": "Ben‑Gurion casou‑se com Paula Munweis (Paula Ben‑Gurion) em 1917; tiveram três filhos: Geula, Amos e Renana.",
-    "source": "corpus",
-    "date": "1917"
-  },
-  {
-    "id": "zionism-1",
-    "title": "Sionismo — definição",
-    "text": "Sionismo é o movimento nacional do povo judeu que defende o direito de autodeterminação e a existência de um Estado judeu soberano em sua pátria histórica, Sion/Israel.",
-    "source": "corpus",
-    "date": ""
-  },
-  {
-    "id": "antisemitism-ihra",
-    "title": "Definição de antissemitismo (IHRA)",
-    "text": "Segundo a IHRA, antissemitismo é uma certa percepção dos judeus que pode ser expressa como ódio aos judeus. Manifestações retóricas e físicas são dirigidas a indivíduos judeus ou não‑judeus e/ou suas propriedades, às instituições da comunidade judaica e aos locais de culto.",
-    "source": "corpus",
-    "date": "2016"
-  },
-  {
-    "id": "shoah-1",
-    "title": "Shoá/Holocausto — síntese",
-    "text": "Shoá (Holocausto) refere‑se ao assassinato sistemático de cerca de seis milhões de judeus pelos nazistas e seus colaboradores entre 1941 e 1945, durante a Segunda Guerra Mundial.",
-    "source": "corpus",
-    "date": "1945"
-  },
-  {
-    "id": "jerusalem-1",
-    "title": "Jerusalém — status",
-    "text": "Jerusalém é a capital de Israel e centro espiritual do povo judeu; abriga locais sagrados para o judaísmo, cristianismo e islamismo. Israel estabeleceu sua capital na cidade desde 1949/1950 e unificou Jerusalém em 1967.",
-    "source": "corpus",
-    "date": "1967"
-  },
-  {
-    "id": "idf-1",
-    "title": "FDI/IDF — definição",
-    "text": "As Forças de Defesa de Israel (FDI/IDF) são as forças armadas do Estado de Israel, responsáveis pela defesa do país desde 1948, integrando Exército, Marinha e Força Aérea.",
-    "source": "corpus",
-    "date": "1948"
+    "date": "1994"
   },
   {
     "id": "sixday-1",
-    "title": "Guerra dos Seis Dias — síntese",
-    "text": "A Guerra dos Seis Dias ocorreu em junho de 1967 entre Israel e estados árabes vizinhos. Israel, sob ameaça de cerco e bloqueio, lançou ataques preventivos e conquistou Sinai, Faixa de Gaza, Cisjordânia (Judeia e Samaria), Jerusalém Oriental e Colinas de Golã.",
+    "title": "Guerra dos Seis Dias",
+    "text": "Em junho de 1967, Israel enfrentou Egito, Síria e Jordânia; em seis dias conquistou Sinai, Gaza, Cisjordânia, Jerusalém Oriental e Colinas de Golã.",
     "source": "corpus",
     "date": "1967-06"
   },
   {
     "id": "yomkippur-1",
-    "title": "Guerra do Yom Kipur — síntese",
-    "text": "A Guerra do Yom Kipur começou em 6 de outubro de 1973 com ataques surpresa do Egito e da Síria durante o feriado judaico de Yom Kipur. O conflito durou até 25 de outubro de 1973.",
+    "title": "Guerra do Yom Kippur",
+    "text": "A Guerra do Yom Kippur começou em 6 de outubro de 1973 com ataque surpresa de Egito e Síria; terminou em 25 de outubro sob cessar-fogo mediado pela ONU.",
     "source": "corpus",
     "date": "1973-10-06"
   },
   {
     "id": "oslo-1",
-    "title": "Acordos de Oslo — síntese",
-    "text": "Os Acordos de Oslo (1993–1995) estabeleceram um processo de paz entre Israel e a OLP, criando a Autoridade Palestina e definindo cooperação em segurança e assuntos civis.",
+    "title": "Acordos de Oslo",
+    "text": "Os Acordos de Oslo (1993–1995) criaram a Autoridade Palestina e previram negociações sobre Jerusalém, refugiados, fronteiras e segurança.",
     "source": "corpus",
     "date": "1993"
   },
   {
     "id": "campdavid-1",
-    "title": "Acordos de Camp David (1978)",
-    "text": "Em 1978, Israel e Egito assinaram os Acordos de Camp David, mediado pelos EUA; resultaram no Tratado de Paz Israel–Egito (1979) e na retirada israelense do Sinai.",
+    "title": "Acordos de Camp David",
+    "text": "Os Acordos de Camp David (1978) resultaram no Tratado de Paz Israel-Egito (1979) e na retirada israelense do Sinai.",
     "source": "corpus",
-    "date": "1979"
+    "date": "1978"
   },
   {
-    "id": "hamas-1",
-    "title": "Hamas — síntese",
-    "text": "Hamas é uma organização islamista palestina fundada em 1987, com braço político e militar; é designada organização terrorista por EUA, UE e outros. Governou a Faixa de Gaza desde 2007.",
+    "id": "abraham-1",
+    "title": "Acordos de Abraão",
+    "text": "Em 2020, Israel normalizou relações diplomáticas com Emirados Árabes Unidos, Bahrein, Marrocos e Sudão nos Acordos de Abraão.",
     "source": "corpus",
-    "date": "1987"
+    "date": "2020"
   },
   {
-    "id": "hezbollah-1",
-    "title": "Hezbollah — síntese",
-    "text": "Hezbollah é uma organização xiita libanesa fundada com apoio do Irã; mantém um arsenal significativo no Líbano e é considerada organização terrorista por diversos países.",
-    "source": "corpus",
-    "date": ""
-  },
-  {
-    "id": "nakba-1",
-    "title": "Nakba — definição",
-    "text": "Nakba (\"catástrofe\", em árabe) refere‑se ao deslocamento e êxodo de árabes palestinos durante a Guerra de 1948, com causas e números debatidos na historiografia.",
+    "id": "idf-1",
+    "title": "Forças de Defesa de Israel (IDF)",
+    "text": "As Forças de Defesa de Israel são o exército nacional, criado em 1948, com serviço militar obrigatório e três ramos: terrestre, aéreo e naval.",
     "source": "corpus",
     "date": "1948"
   },
   {
+    "id": "mossad-1",
+    "title": "Mossad",
+    "text": "O Mossad é o serviço de inteligência exterior de Israel, responsável por coleta de informações, operações secretas e contraterrorismo.",
+    "source": "corpus",
+    "date": "2020"
+  },
+  {
+    "id": "haganah-1",
+    "title": "Haganah",
+    "text": "A Haganah foi a principal organização de autodefesa judaica antes de 1948 e serviu de base para a criação das IDF.",
+    "source": "corpus",
+    "date": "1948"
+  },
+  {
+    "id": "palmach-1",
+    "title": "Palmach",
+    "text": "O Palmach era a unidade de elite da Haganah entre 1941 e 1948, destacando-se em operações durante a Guerra da Independência.",
+    "source": "corpus",
+    "date": "1948"
+  },
+  {
+    "id": "iron-dome-1",
+    "title": "Cúpula de Ferro (Iron Dome)",
+    "text": "O sistema Iron Dome, operacional desde 2011, intercepta foguetes de curto alcance lançados contra áreas povoadas de Israel.",
+    "source": "corpus",
+    "date": "2011"
+  },
+  {
     "id": "lawreturn-1",
     "title": "Lei do Retorno",
-    "text": "A Lei do Retorno de 1950 garante a todo judeu o direito de imigrar para Israel e obter cidadania, com emendas posteriores definindo elegibilidade e exceções.",
+    "text": "Aprovada em 1950, a Lei do Retorno garante a todo judeu o direito de imigrar para Israel e obter cidadania.",
     "source": "corpus",
     "date": "1950"
+  },
+  {
+    "id": "jerusalem-1",
+    "title": "Jerusalém — status",
+    "text": "Jerusalém é a capital de Israel e abriga locais sagrados das três religiões monoteístas; o status final permanece em debate internacional.",
+    "source": "corpus",
+    "date": "2018"
+  },
+  {
+    "id": "gaza-1",
+    "title": "Faixa de Gaza",
+    "text": "A Faixa de Gaza é um território costeiro de 365 km², com mais de 2 milhões de habitantes; controlada pelo Hamas desde 2007.",
+    "source": "corpus",
+    "date": "2020"
+  },
+  {
+    "id": "westbank-1",
+    "title": "Cisjordânia",
+    "text": "A Cisjordânia é um território a oeste do rio Jordão, incluindo Jerusalém Oriental; Israel a chama de Judeia e Samaria.",
+    "source": "corpus",
+    "date": "2020"
+  },
+  {
+    "id": "shoah-1",
+    "title": "Shoah (Holocausto)",
+    "text": "O Holocausto foi o genocídio nazista que exterminou cerca de 6 milhões de judeus entre 1941 e 1945.",
+    "source": "corpus",
+    "date": "1945"
+  },
+  {
+    "id": "antisemitism-ihra-1",
+    "title": "Definição IHRA de Antissemitismo",
+    "text": "Segundo a IHRA, antissemitismo é uma percepção dos judeus que pode se manifestar como ódio, em palavras ou ações, contra judeus e instituições judaicas.",
+    "source": "corpus",
+    "date": "2016"
   }
 ]
