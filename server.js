@@ -76,9 +76,7 @@ app.post(["/whatsapp", "/twilio/whatsapp"], async (req, res) => {
 
     if (from) {
       try { await sendWhatsApp(from, "✅ Recebi, processando…"); }
-      catch (e) { console.error("[ACK] falhou:", e?.message || e); }
-    }
-
+app.post(["/whatsapp", "/twilio/whatsapp"]
     const audioText = await maybeTranscribeWhatsApp(req.body);
     const userText = (audioText || req.body.Body || "").trim();
     if (!userText) return;
