@@ -1,3 +1,4 @@
+// server.js
 import express from "express";
 import bodyParser from "body-parser";
 import { v4 as uuidv4 } from "uuid";
@@ -10,7 +11,7 @@ import { splitForWhatsApp } from "./utils/splitMessage.js";
 import { sendWhatsApp } from "./services/twilioClient.js";
 import { maybeTranscribeWhatsApp } from "./services/audio.js";
 import { answerWithRAG } from "./services/hybridRag.js";
-import { initMemory, writeTurn, getSubject, setSubject } from "./services/memory.js";
+import { initMemory, readHistory, writeTurn, getSubject, setSubject } from "./services/memory.js";
 
 /* Guard-rails: não deixe o processo cair sem log */
 process.on("uncaughtException", (e) => console.error("[FATAL] uncaughtException:", e));
@@ -20,8 +21,10 @@ const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
+/* --- ping simples --- */
 app.get("/", (_req, res) => res.send("True Live 5.6-MVP up"));
 
+/* --- health (com métricas) --- */
 app.get("/admin/health", (req, res) => {
   if (req.headers["x-admin-token"] !== CONFIG.ADMIN_TOKEN) return res.json({ ok: false });
 
@@ -49,7 +52,7 @@ app.get("/admin/health", (req, res) => {
   });
 });
 
-/* Helpers para pronomes/sujeito */
+/* --- helpers: sujeito/pronomes --- */
 function needsSubject(text, lang) {
   const t = (text || "").toLowerCase();
   const pt = ["ele","ela","dele","dela","esposa","marido","onde","quando","nasceu","morreu","filhos","pais"];
@@ -64,19 +67,23 @@ function resolveWithSubject(text, subject, lang) {
   return `${text}\n\n(Contexto: estamos falando de ${subject})`;
 }
 
-/* Webhook */
+/* --- webhook Twilio/WhatsApp --- */
 app.post(["/whatsapp", "/twilio/whatsapp"], async (req, res) => {
   const t0 = Date.now();
-  res.status(200).end();
+  res.status(200).end(); // ACK técnico para a Twilio
 
   try {
     const from = (req.body.From || "").trim();
     const userId = from || uuidv4();
     console.log(`[INBOUND] From=${from} NumMedia=${req.body.NumMedia || 0} BodyLen=${(req.body.Body||"").length}`);
 
+    // ACK visível ao usuário
     if (from) {
       try { await sendWhatsApp(from, "✅ Recebi, processando…"); }
-app.post(["/whatsapp", "/twilio/whatsapp"]
+      catch (e) { console.error("[ACK] falhou:", e?.message || e); }
+    }
+
+    // Texto/áudio
     const audioText = await maybeTranscribeWhatsApp(req.body);
     const userText = (audioText || req.body.Body || "").trim();
     if (!userText) return;
@@ -85,28 +92,45 @@ app.post(["/whatsapp", "/twilio/whatsapp"]
     const lastSubject = await getSubject(userId);
     const enriched = resolveWithSubject(userText, lastSubject, lang);
 
+    // RAG + fallback (robusto a timeout)
     const { text, kind, score, subject } = await answerWithRAG(enriched, lang);
 
+    // Persistência
     await writeTurn(userId, "user", userText);
     await writeTurn(userId, "assistant", text);
     if (subject) await setSubject(userId, subject);
 
+    // Envio final (com split para WhatsApp)
     for (const part of splitForWhatsApp(text)) await sendWhatsApp(from, part);
 
     const ms = Date.now() - t0;
     console.log(`[WHATSAPP] from=${from} lang=${lang} kind=${kind} score=${(score||0).toFixed(3)} ms=${ms} subject=${subject || lastSubject || "n/a"}`);
   } catch (e) {
+    // >>> ESTE É O CATCH QUE VOCÊ PROCUROU <<<
     console.error("ERR /whatsapp:", e?.message || e);
+    try {
+      const from = (req.body.From || "").trim();
+      if (from) {
+        const lang = detectLang((req.body.Body || "").toString());
+        const msg = lang === "pt"
+          ? "Tive um problema momentâneo para concluir a resposta. Pode enviar novamente?"
+          : lang === "es"
+          ? "Tuve un problema momentáneo para completar la respuesta. ¿Puedes enviarla de nuevo?"
+          : "I had a temporary issue finishing the reply. Could you send it again?";
+        await sendWhatsApp(from, msg);
+      }
+    } catch {}
   }
 });
 
-/* Teste simples de envio */
+/* --- rota de teste de envio pelo navegador --- */
+/** GET /admin/test-whatsapp?token=ADMIN_TOKEN&to=whatsapp:%2B5511999999999 */
 app.get("/admin/test-whatsapp", async (req, res) => {
   if ((req.query.token || "") !== CONFIG.ADMIN_TOKEN) {
     return res.json({ ok: false, error: "unauthorized" });
   }
   const to = (req.query.to || "").trim();
-  if (!to) return res.json({ ok: false, error: "missing 'to' (ex.: whatsapp:+55...)" });
+  if (!to) return res.json({ ok: false, error: "missing 'to' (ex.: whatsapp:%2B55...)" });
   try {
     const r = await sendWhatsApp(to, "Ping True Live 5.6 ✅");
     return res.json({ ok: true, sid: r.sid });
@@ -115,7 +139,7 @@ app.get("/admin/test-whatsapp", async (req, res) => {
   }
 });
 
-/* Start sem await no topo */
+/* --- start sem await no topo --- */
 async function start() {
   try { await initMemory(); }
   catch (e) { console.error("[INIT] falha initMemory (segue):", e?.message || e); }
