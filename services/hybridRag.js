@@ -13,7 +13,6 @@ function safeJson(p, fb) { try { return JSON.parse(fs.readFileSync(p, "utf8")); 
 
 let STATE = {
   ready: false,
-  natural: null,     // módulo opcional
   corpus: [],
   docsOriginal: [],
   aliases: {},
@@ -66,7 +65,7 @@ function tagInside(lang){ return lang==="pt"?"Baseado no acervo": lang==="es"?"B
 function tagOutsideText(lang){ return lang==="pt"?"Resposta geral (fora do acervo)": lang==="es"?"Respuesta general (fuera del acervo)":"General answer (outside the corpus)"; }
 function maybeLabelOutside(body, lang){ return (CONFIG.ANSWER_OUTSIDE_CORPUS ? `${tagOutsideText(lang)}:\n` : "") + body; }
 
-/** Inicializa corpus/aliases e tenta carregar 'natural' dinamicamente. */
+/** Inicializa corpus/aliases/fontes. */
 async function ensureReady() {
   if (STATE.ready) return;
   STATE.corpus = safeJson(corpusPath, []);
@@ -76,18 +75,21 @@ async function ensureReady() {
   STATE.aliasesCompiled = compileAliases(STATE.aliases);
   STATE.docsOriginal = STATE.corpus.map(e => `${e.title || ""}\n${e.text || ""}`);
 
-  try {
-    // carrega natural apenas se disponível no ambiente
-    const mod = await import("natural");
-    STATE.natural = mod.default || mod;
-  } catch (_) {
-    STATE.natural = null; // segue sem 'natural'
-    console.warn("[RAG] pacote 'natural' indisponível — usando scoring simples.");
-  }
   STATE.ready = true;
 }
 
-// ranking léxico robusto (considera sobreposição de palavras + assunto/aliases)
+/** Embeddings + helpers */
+async function embed(texts){
+  const r = await withTimeout(
+    openai.embeddings.create({ model: CONFIG.OPENAI_EMBED_MODEL, input: texts }),
+    CONFIG.OPENAI_TIMEOUT_MS
+  );
+  return r.data.map(e => e.embedding);
+}
+function cosine(a,b){ let dot=0,na=0,nb=0; for (let i=0;i<a.length;i++){ dot+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; } return dot/(Math.sqrt(na)*Math.sqrt(nb)+1e-9); }
+function normalize01(s){ return Math.max(0, Math.min(1, s)); }
+
+/** Ranking léxico robusto (sem OpenAI), com “assunto” como boost */
 function simpleTopK(qNorm, subject, k = 6) {
   const qTokens = Array.from(new Set(qNorm.split(" ").filter(w => w.length > 2)));
   const scores = STATE.docsOriginal.map((doc, index) => {
@@ -98,32 +100,22 @@ function simpleTopK(qNorm, subject, k = 6) {
     // sobreposição: fração de tokens da pergunta presentes no doc
     let overlap = 0;
     for (const w of qTokens) if (dn.includes(w)) overlap += 1;
-    const overlapScore = qTokens.length ? (overlap / qTokens.length) : 0;
+    const overlapScore = qTokens.length ? (overlap / qTokens.length) : 0; // 0..1
 
     // boost se o "assunto" (via aliases) estiver no título ou texto
     const subj = (subject || "").toLowerCase();
     const subjectHit = subj ? (dn.includes(subj) || tn.includes(subj)) : false;
-    const subjectBoost = subjectHit ? 0.5 : 0;
+    const subjectBoost = subjectHit ? 0.5 : 0; // 0 ou 0.5
 
-    // bônus pequeno por título “bem próximo” do assunto
+    // bônus por título muito próximo do assunto
     const titleBoost = subj && tn.startsWith(subj) ? 0.2 : 0;
 
     const score = overlapScore + subjectBoost + titleBoost; // 0..1.7
-    return { index, score, subjectHit };
+    return { index, score: normalize01(score), subjectHit };
   });
 
   return scores.sort((a, b) => b.score - a.score).slice(0, k);
 }
-
-async function embed(texts){
-  const r = await withTimeout(
-    openai.embeddings.create({ model: CONFIG.OPENAI_EMBED_MODEL, input: texts }),
-    CONFIG.OPENAI_TIMEOUT_MS
-  );
-  return r.data.map(e => e.embedding);
-}
-function cosine(a,b){ let dot=0,na=0,nb=0; for (let i=0;i<a.length;i++){ dot+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; } return dot/(Math.sqrt(na)*Math.sqrt(nb)+1e-9); }
-function normalizeScore(s){ return Math.max(0, Math.min(1, s)); }
 
 export async function answerWithRAG(userQuery, lang="pt"){
   await ensureReady();
@@ -137,19 +129,22 @@ export async function answerWithRAG(userQuery, lang="pt"){
   const qSubjects = extractSubjectsFrom(qNorm);
   const subject = qSubjects.length ? prettySubject(qSubjects[0]) : null;
 
-  // 1) Ranking básico (sempre disponível)
-  const baseTop = simpleTopK(qNorm, 6);
+  // >>> AQUI está a linha pedida (agora já alterada): <<<
+  const baseTop = simpleTopK(qNorm, subject, 6);
 
-  // 2) Embeddings (híbrido) — se falhar, usa só ranking básico
+  // Tenta embeddings; se falhar, fica só no ranking léxico
   let embeds;
   try { embeds = await embed([qNorm, ...baseTop.map(t => STATE.docsOriginal[t.index] || "")]); } catch {}
+
+  const accept = Math.max(0.35, Number(CONFIG.RAG_THRESHOLD || 0.5)); // nunca abaixo de 0.35
+
   if (!embeds) {
     const best = baseTop[0];
-    if (best && best.score >= CONFIG.RAG_THRESHOLD) {
+    if (best && best.score >= accept) {
       const entry = STATE.corpus[best.index];
       const fontesTxt = entry?.sources?.length ? "\n\nFontes: " + entry.sources.map(s=>`• ${s}`).join("\n") : "";
-      const text = `${tagInside(lang)}:\n${(entry?.text||"").trim()}${fontesTxt}`;
-      return { kind:"corpus", text, score: normalizeScore(best.score), subject };
+      const text = `${tagInside(lang)}:\n${(entry?.text || "").trim()}${fontesTxt}`;
+      return { kind:"corpus", text, score: best.score, subject };
     }
     return await doFallback(userQuery, lang, subject, best?.score || 0);
   }
@@ -159,14 +154,14 @@ export async function answerWithRAG(userQuery, lang="pt"){
   const semScores = cEmb.map(e => cosine(qEmb, e));
   const combined = baseTop.map((t,i)=>({
     index: t.index,
-    score: 0.5*normalizeScore(t.score) + 0.5*semScores[i]
+    score: 0.5*normalize01(t.score) + 0.5*semScores[i]
   })).sort((a,b)=>b.score-a.score);
 
   const best = combined[0];
-  if (best && best.score >= CONFIG.RAG_THRESHOLD) {
+  if (best && best.score >= accept) {
     const entry = STATE.corpus[best.index];
     const fontesTxt = entry?.sources?.length ? "\n\nFontes: " + entry.sources.map(s=>`• ${s}`).join("\n") : "";
-    const text = `${tagInside(lang)}:\n${(entry?.text||"").trim()}${fontesTxt}`;
+    const text = `${tagInside(lang)}:\n${(entry?.text || "").trim()}${fontesTxt}`;
     return { kind:"corpus", text, score: best.score, subject };
   }
 
@@ -189,23 +184,17 @@ async function doFallback(userQuery, lang, subject, score = 0) {
 
   try {
     const comp = await withTimeout(
-      openai.chat.completions.create({
-        model: CONFIG.OPENAI_MODEL,
-        messages,
-        temperature: 0.4
-      }),
+      openai.chat.completions.create({ model: CONFIG.OPENAI_MODEL, messages, temperature: 0.4 }),
       CONFIG.OPENAI_TIMEOUT_MS
     );
     const txt = comp.choices?.[0]?.message?.content?.trim() || "OK.";
     return { kind: "fallback", text: maybeLabelOutside(txt, lang), score, subject };
-  } catch (e) {
-    // Plano C: nunca deixar o usuário sem resposta
+  } catch {
     const msg = {
       pt: "No momento não consegui consultar a fonte externa. Tente novamente em instantes.",
       es: "En este momento no pude consultar la fuente externa. Intenta de nuevo en unos instantes.",
       en: "I couldn’t reach the external source right now. Please try again shortly."
     }[lang] || "No momento não consegui consultar a fonte externa. Tente novamente em instantes.";
-
     return { kind: "fallback_error", text: maybeLabelOutside(msg, lang), score, subject };
   }
 }
