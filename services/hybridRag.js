@@ -84,4 +84,99 @@ async function ensureReady() {
     STATE.natural = null; // segue sem 'natural'
     console.warn("[RAG] pacote 'natural' indisponível — usando scoring simples.");
   }
-  ST
+  STATE.ready = true;
+}
+
+/** TF simples (fallback) */
+function simpleTopK(qNorm, k=5) {
+  const scores = STATE.docsOriginal.map((d, idx) => {
+    const dn = applyAliasesNormalized(baseNormalize(d));
+    let s = 0;
+    if (dn.includes(qNorm)) s += 1;
+    // bônus por cada termo em comum
+    const qw = new Set(qNorm.split(" "));
+    for (const w of qw) if (w.length > 2 && dn.includes(w)) s += 0.1;
+    return { index: idx, score: s };
+  });
+  return scores.sort((a,b)=>b.score-a.score).slice(0, k);
+}
+
+async function embed(texts){
+  const r = await withTimeout(
+    openai.embeddings.create({ model: CONFIG.OPENAI_EMBED_MODEL, input: texts }),
+    CONFIG.OPENAI_TIMEOUT_MS
+  );
+  return r.data.map(e => e.embedding);
+}
+function cosine(a,b){ let dot=0,na=0,nb=0; for (let i=0;i<a.length;i++){ dot+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; } return dot/(Math.sqrt(na)*Math.sqrt(nb)+1e-9); }
+function normalizeScore(s){ return Math.max(0, Math.min(1, s)); }
+
+export async function answerWithRAG(userQuery, lang="pt"){
+  await ensureReady();
+
+  if (!Array.isArray(STATE.corpus) || STATE.corpus.length===0) {
+    return { kind:"fallback", text: maybeLabelOutside("Nenhum item do acervo carregado.", lang), score: 0, subject: null };
+  }
+
+  const qNorm0 = baseNormalize(userQuery);
+  const qNorm = applyAliasesNormalized(qNorm0);
+  const qSubjects = extractSubjectsFrom(qNorm);
+  const subject = qSubjects.length ? prettySubject(qSubjects[0]) : null;
+
+  // 1) Ranking básico (sempre disponível)
+  const baseTop = simpleTopK(qNorm, 6);
+
+  // 2) Embeddings (híbrido) — se falhar, usa só ranking básico
+  let embeds;
+  try { embeds = await embed([qNorm, ...baseTop.map(t => STATE.docsOriginal[t.index] || "")]); } catch {}
+  if (!embeds) {
+    const best = baseTop[0];
+    if (best && best.score >= CONFIG.RAG_THRESHOLD) {
+      const entry = STATE.corpus[best.index];
+      const fontesTxt = entry?.sources?.length ? "\n\nFontes: " + entry.sources.map(s=>`• ${s}`).join("\n") : "";
+      const text = `${tagInside(lang)}:\n${(entry?.text||"").trim()}${fontesTxt}`;
+      return { kind:"corpus", text, score: normalizeScore(best.score), subject };
+    }
+    return await doFallback(userQuery, lang, subject, best?.score || 0);
+  }
+
+  const qEmb = embeds[0];
+  const cEmb = embeds.slice(1);
+  const semScores = cEmb.map(e => cosine(qEmb, e));
+  const combined = baseTop.map((t,i)=>({
+    index: t.index,
+    score: 0.5*normalizeScore(t.score) + 0.5*semScores[i]
+  })).sort((a,b)=>b.score-a.score);
+
+  const best = combined[0];
+  if (best && best.score >= CONFIG.RAG_THRESHOLD) {
+    const entry = STATE.corpus[best.index];
+    const fontesTxt = entry?.sources?.length ? "\n\nFontes: " + entry.sources.map(s=>`• ${s}`).join("\n") : "";
+    const text = `${tagInside(lang)}:\n${(entry?.text||"").trim()}${fontesTxt}`;
+    return { kind:"corpus", text, score: best.score, subject };
+  }
+
+  return await doFallback(userQuery, lang, subject, best?.score || 0);
+}
+
+async function doFallback(userQuery, lang, subject, score=0){
+  const sys = {
+    pt: "Você é um assistente direto. Responda em português em até 1200 caracteres.",
+    es: "Eres un asistente directo. Responde en español en hasta 1200 caracteres.",
+    en: "You are a direct assistant. Answer in English in up to 1200 characters."
+  }[lang] || "Você é um assistente direto. Responda em português em até 1200 caracteres.";
+
+  const hosts = fontesHintHosts(10);
+  const extra = subject ? ` Contexto: a conversa atual é sobre ${subject}.` : "";
+  const messages = [
+    { role: "system", content: sys + (hosts ? ` Prefira fatos consistentes com: ${hosts}.` : "") + extra },
+    { role: "user", content: userQuery }
+  ];
+
+  const comp = await withTimeout(
+    openai.chat.completions.create({ model: CONFIG.OPENAI_MODEL, messages, temperature: 0.4 }),
+    CONFIG.OPENAI_TIMEOUT_MS
+  );
+  const txt = comp.choices?.[0]?.message?.content?.trim() || "OK.";
+  return { kind:"fallback", text: maybeLabelOutside(txt, lang), score, subject };
+}
