@@ -87,18 +87,32 @@ async function ensureReady() {
   STATE.ready = true;
 }
 
-/** TF simples (fallback) */
-function simpleTopK(qNorm, k=5) {
-  const scores = STATE.docsOriginal.map((d, idx) => {
-    const dn = applyAliasesNormalized(baseNormalize(d));
-    let s = 0;
-    if (dn.includes(qNorm)) s += 1;
-    // bônus por cada termo em comum
-    const qw = new Set(qNorm.split(" "));
-    for (const w of qw) if (w.length > 2 && dn.includes(w)) s += 0.1;
-    return { index: idx, score: s };
+// ranking léxico robusto (considera sobreposição de palavras + assunto/aliases)
+function simpleTopK(qNorm, subject, k = 6) {
+  const qTokens = Array.from(new Set(qNorm.split(" ").filter(w => w.length > 2)));
+  const scores = STATE.docsOriginal.map((doc, index) => {
+    const entry = STATE.corpus[index] || {};
+    const dn = applyAliasesNormalized(baseNormalize(doc));
+    const tn = applyAliasesNormalized(baseNormalize(entry.title || ""));
+
+    // sobreposição: fração de tokens da pergunta presentes no doc
+    let overlap = 0;
+    for (const w of qTokens) if (dn.includes(w)) overlap += 1;
+    const overlapScore = qTokens.length ? (overlap / qTokens.length) : 0;
+
+    // boost se o "assunto" (via aliases) estiver no título ou texto
+    const subj = (subject || "").toLowerCase();
+    const subjectHit = subj ? (dn.includes(subj) || tn.includes(subj)) : false;
+    const subjectBoost = subjectHit ? 0.5 : 0;
+
+    // bônus pequeno por título “bem próximo” do assunto
+    const titleBoost = subj && tn.startsWith(subj) ? 0.2 : 0;
+
+    const score = overlapScore + subjectBoost + titleBoost; // 0..1.7
+    return { index, score, subjectHit };
   });
-  return scores.sort((a,b)=>b.score-a.score).slice(0, k);
+
+  return scores.sort((a, b) => b.score - a.score).slice(0, k);
 }
 
 async function embed(texts){
