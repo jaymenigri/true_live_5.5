@@ -159,7 +159,7 @@ export async function answerWithRAG(userQuery, lang="pt"){
   return await doFallback(userQuery, lang, subject, best?.score || 0);
 }
 
-async function doFallback(userQuery, lang, subject, score=0){
+async function doFallback(userQuery, lang, subject, score = 0) {
   const sys = {
     pt: "Você é um assistente direto. Responda em português em até 1200 caracteres.",
     es: "Eres un asistente directo. Responde en español en hasta 1200 caracteres.",
@@ -173,10 +173,25 @@ async function doFallback(userQuery, lang, subject, score=0){
     { role: "user", content: userQuery }
   ];
 
-  const comp = await withTimeout(
-    openai.chat.completions.create({ model: CONFIG.OPENAI_MODEL, messages, temperature: 0.4 }),
-    CONFIG.OPENAI_TIMEOUT_MS
-  );
-  const txt = comp.choices?.[0]?.message?.content?.trim() || "OK.";
-  return { kind:"fallback", text: maybeLabelOutside(txt, lang), score, subject };
+  try {
+    const comp = await withTimeout(
+      openai.chat.completions.create({
+        model: CONFIG.OPENAI_MODEL,
+        messages,
+        temperature: 0.4
+      }),
+      CONFIG.OPENAI_TIMEOUT_MS
+    );
+    const txt = comp.choices?.[0]?.message?.content?.trim() || "OK.";
+    return { kind: "fallback", text: maybeLabelOutside(txt, lang), score, subject };
+  } catch (e) {
+    // Plano C: nunca deixar o usuário sem resposta
+    const msg = {
+      pt: "No momento não consegui consultar a fonte externa. Tente novamente em instantes.",
+      es: "En este momento no pude consultar la fuente externa. Intenta de nuevo en unos instantes.",
+      en: "I couldn’t reach the external source right now. Please try again shortly."
+    }[lang] || "No momento não consegui consultar a fonte externa. Tente novamente em instantes.";
+
+    return { kind: "fallback_error", text: maybeLabelOutside(msg, lang), score, subject };
+  }
 }
