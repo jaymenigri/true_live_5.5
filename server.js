@@ -12,15 +12,23 @@ import { maybeTranscribeWhatsApp } from "./services/audio.js";
 import { answerWithRAG } from "./services/hybridRag.js";
 import { initMemory, writeTurn, getSubject, setSubject } from "./services/memory.js";
 
+/* ---------- guard-rails para não derrubar o processo ---------- */
+process.on("uncaughtException", (e) =>
+  console.error("[FATAL] uncaughtException:", e?.stack || e)
+);
+process.on("unhandledRejection", (e) =>
+  console.error("[FATAL] unhandledRejection:", e?.stack || e)
+);
+
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-await initMemory();
-
-/* --------------------- /admin/health (com métricas) --------------------- */
+/* --------------------- health --------------------- */
 app.get("/admin/health", (req, res) => {
-  if (req.headers["x-admin-token"] !== CONFIG.ADMIN_TOKEN) return res.json({ ok: false });
+  if (req.headers["x-admin-token"] !== CONFIG.ADMIN_TOKEN) {
+    return res.json({ ok: false });
+  }
 
   let corpusCount = 0, aliasesCount = 0, fontesCount = 0;
   try { corpusCount = JSON.parse(fs.readFileSync("./corpus/corpus.json","utf8")).length || 0; } catch {}
@@ -71,49 +79,37 @@ app.post(["/whatsapp", "/twilio/whatsapp"], async (req, res) => {
     const userId = from || uuidv4();
     console.log(`[INBOUND] From=${from} NumMedia=${req.body.NumMedia || 0} BodyLen=${(req.body.Body||"").length}`);
 
-    // ACK visível ao usuário
+    // ACK visível
     if (from) {
-      try {
-        await sendWhatsApp(from, "✅ Recebi, processando…");
-      } catch (e) {
-        console.error("[ACK] falhou:", e?.message || e);
-      }
+      try { await sendWhatsApp(from, "✅ Recebi, processando…"); }
+      catch (e) { console.error("[ACK] falhou:", e?.message || e); }
     }
 
-    // Texto ou áudio
+    // texto/áudio
     const audioText = await maybeTranscribeWhatsApp(req.body);
     const userText = (audioText || req.body.Body || "").trim();
     if (!userText) return;
 
     const lang = detectLang(userText);
-
-    // sujeito lembrado
     const lastSubject = await getSubject(userId);
     const enriched = resolveWithSubject(userText, lastSubject, lang);
 
-    // RAG + fallback
     const { text, kind, score, subject } = await answerWithRAG(enriched, lang);
 
-    // persistência
     await writeTurn(userId, "user", userText);
     await writeTurn(userId, "assistant", text);
     if (subject) await setSubject(userId, subject);
 
-    // envio (split)
     for (const part of splitForWhatsApp(text)) await sendWhatsApp(from, part);
 
     const ms = Date.now() - t0;
     console.log(`[WHATSAPP] from=${from} lang=${lang} kind=${kind} score=${(score||0).toFixed(3)} ms=${ms} subject=${subject || lastSubject || "n/a"}`);
   } catch (e) {
-    try { console.error("ERR /whatsapp:", e?.message || e); } catch {}
+    console.error("ERR /whatsapp:", e?.stack || e);
   }
 });
 
-/* --------------------- rota de teste simples (via navegador) --------------------- */
-/**
- * GET /admin/test-whatsapp?token=ADMIN_TOKEN&to=whatsapp:+55SEUNUMERO
- * Retorna { ok:true, sid:... } OU { ok:false, error:... }
- */
+/* --------------------- teste simples de envio --------------------- */
 app.get("/admin/test-whatsapp", async (req, res) => {
   if ((req.query.token || "") !== CONFIG.ADMIN_TOKEN) {
     return res.json({ ok: false, error: "unauthorized" });
@@ -130,5 +126,15 @@ app.get("/admin/test-whatsapp", async (req, res) => {
 
 app.get("/", (_req, res) => res.send("True Live 5.6-MVP up"));
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("True Live 5.6-MVP listening on", PORT));
+/* --------------------- start sem await no topo --------------------- */
+async function start() {
+  try {
+    await initMemory(); // cria tabelas se houver DB_URL
+  } catch (e) {
+    console.error("[INIT] falha initMemory (segue assim mesmo):", e?.message || e);
+  }
+
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.log("True Live 5.6-MVP listening on", PORT));
+}
+start();
