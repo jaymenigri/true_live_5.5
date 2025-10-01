@@ -12,23 +12,18 @@ import { maybeTranscribeWhatsApp } from "./services/audio.js";
 import { answerWithRAG } from "./services/hybridRag.js";
 import { initMemory, writeTurn, getSubject, setSubject } from "./services/memory.js";
 
-/* ---------- guard-rails para não derrubar o processo ---------- */
-process.on("uncaughtException", (e) =>
-  console.error("[FATAL] uncaughtException:", e?.stack || e)
-);
-process.on("unhandledRejection", (e) =>
-  console.error("[FATAL] unhandledRejection:", e?.stack || e)
-);
+/* Guard-rails: não deixe o processo cair sem log */
+process.on("uncaughtException", (e) => console.error("[FATAL] uncaughtException:", e));
+process.on("unhandledRejection",  (e) => console.error("[FATAL] unhandledRejection:", e));
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-/* --------------------- health --------------------- */
+app.get("/", (_req, res) => res.send("True Live 5.6-MVP up"));
+
 app.get("/admin/health", (req, res) => {
-  if (req.headers["x-admin-token"] !== CONFIG.ADMIN_TOKEN) {
-    return res.json({ ok: false });
-  }
+  if (req.headers["x-admin-token"] !== CONFIG.ADMIN_TOKEN) return res.json({ ok: false });
 
   let corpusCount = 0, aliasesCount = 0, fontesCount = 0;
   try { corpusCount = JSON.parse(fs.readFileSync("./corpus/corpus.json","utf8")).length || 0; } catch {}
@@ -54,7 +49,7 @@ app.get("/admin/health", (req, res) => {
   });
 });
 
-/* -------- helpers: pronomes/sujeito -------- */
+/* Helpers para pronomes/sujeito */
 function needsSubject(text, lang) {
   const t = (text || "").toLowerCase();
   const pt = ["ele","ela","dele","dela","esposa","marido","onde","quando","nasceu","morreu","filhos","pais"];
@@ -69,23 +64,21 @@ function resolveWithSubject(text, subject, lang) {
   return `${text}\n\n(Contexto: estamos falando de ${subject})`;
 }
 
-/* --------------------- webhook: /whatsapp e /twilio/whatsapp --------------------- */
+/* Webhook */
 app.post(["/whatsapp", "/twilio/whatsapp"], async (req, res) => {
   const t0 = Date.now();
-  res.status(200).end(); // ACK técnico para Twilio
+  res.status(200).end();
 
   try {
     const from = (req.body.From || "").trim();
     const userId = from || uuidv4();
     console.log(`[INBOUND] From=${from} NumMedia=${req.body.NumMedia || 0} BodyLen=${(req.body.Body||"").length}`);
 
-    // ACK visível
     if (from) {
       try { await sendWhatsApp(from, "✅ Recebi, processando…"); }
       catch (e) { console.error("[ACK] falhou:", e?.message || e); }
     }
 
-    // texto/áudio
     const audioText = await maybeTranscribeWhatsApp(req.body);
     const userText = (audioText || req.body.Body || "").trim();
     if (!userText) return;
@@ -105,11 +98,11 @@ app.post(["/whatsapp", "/twilio/whatsapp"], async (req, res) => {
     const ms = Date.now() - t0;
     console.log(`[WHATSAPP] from=${from} lang=${lang} kind=${kind} score=${(score||0).toFixed(3)} ms=${ms} subject=${subject || lastSubject || "n/a"}`);
   } catch (e) {
-    console.error("ERR /whatsapp:", e?.stack || e);
+    console.error("ERR /whatsapp:", e?.message || e);
   }
 });
 
-/* --------------------- teste simples de envio --------------------- */
+/* Teste simples de envio */
 app.get("/admin/test-whatsapp", async (req, res) => {
   if ((req.query.token || "") !== CONFIG.ADMIN_TOKEN) {
     return res.json({ ok: false, error: "unauthorized" });
@@ -124,16 +117,10 @@ app.get("/admin/test-whatsapp", async (req, res) => {
   }
 });
 
-app.get("/", (_req, res) => res.send("True Live 5.6-MVP up"));
-
-/* --------------------- start sem await no topo --------------------- */
+/* Start sem await no topo */
 async function start() {
-  try {
-    await initMemory(); // cria tabelas se houver DB_URL
-  } catch (e) {
-    console.error("[INIT] falha initMemory (segue assim mesmo):", e?.message || e);
-  }
-
+  try { await initMemory(); }
+  catch (e) { console.error("[INIT] falha initMemory (segue):", e?.message || e); }
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => console.log("True Live 5.6-MVP listening on", PORT));
 }
