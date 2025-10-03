@@ -54,14 +54,43 @@ function log(level, ...args) {
 
 // ---------- Resolução tolerante do RAG ----------
 import * as ragModule from "./services/hybridRag.js";
-const hybridSearch =
-  ragModule.search ||
-  ragModule.hybridSearch ||
-  (typeof ragModule.default === "function" ? ragModule.default : ragModule.default?.search);
+
+// Varre todas as possibilidades comuns de export:
+// - export function search() {}
+// - export const hybridSearch = () => {}
+// - export default function () {}
+// - export default { search() {} }  (objeto com função)
+// - qualquer outra função exportada nomeada
+let hybridSearch = null;
+
+const listCandidates = (mod) => {
+  const arr = [];
+  if (mod) {
+    // candidatos diretos
+    arr.push(mod.search, mod.hybridSearch, mod.default);
+
+    // funções nomeadas do módulo
+    arr.push(...Object.values(mod).filter((v) => typeof v === "function"));
+
+    // se default for objeto, procure funções dentro dele
+    if (mod.default && typeof mod.default === "object") {
+      arr.push(...Object.values(mod.default).filter((v) => typeof v === "function"));
+    }
+    // se default for função, ele já está incluído acima
+  }
+  return arr.filter(Boolean);
+};
+
+for (const fn of listCandidates(ragModule)) {
+  if (typeof fn === "function") {
+    hybridSearch = fn;
+    break;
+  }
+}
 
 if (typeof hybridSearch !== "function") {
   throw new Error(
-    "hybridRag.js: não encontrei a função de busca (search/hybridSearch/default)."
+    "hybridRag.js: não encontrei uma função de busca. Exporte uma função (ex.: `export function search(){}` ou `export default function(){}` ou `export default { search(){}}`)."
   );
 }
 
