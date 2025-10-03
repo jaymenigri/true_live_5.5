@@ -1,203 +1,266 @@
-// services/hybridRag.js
+// services/hybridRag.js — v2.7.0 (estável)
+// - Lê corpus de /corpus/corpus.json e aliases de /config/aliases.json (se existir)
+// - Busca híbrida: TF-IDF + “boost” de título + heurística de semelhança simples
+// - Limiar com “rede de segurança”: se nada passar, mas score>=0.18 ou houver forte match no título, aceita
+// - Exporta *named* (search) e *default* (compat) para evitar erro de import
+// - Não usa lookbehind em regex (compat Node/Heroku)
+
 import fs from "fs";
 import path from "path";
-import { openai, withTimeout } from "./openaiClient.js";
-import { CONFIG } from "../config/appConfig.js";
+import { fileURLToPath } from "url";
 
-const __dir = path.resolve();
-const corpusPath = path.join(__dir, "corpus", "corpus.json");
-const aliasesPath = path.join(__dir, "config", "aliases.json");
-const fontesPath  = path.join(__dir, "data", "fontes.json");
+// -------- util --------
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ROOT = path.join(__dirname, ".."); // /services -> raiz do app
 
-function safeJson(p, fb) { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return fb; } }
+const CORPUS_PATHS = [
+  path.join(ROOT, "corpus", "corpus.json"),
+  path.join(ROOT, "data", "corpus.json"),
+  path.join(process.cwd(), "corpus", "corpus.json"),
+];
 
-let STATE = {
-  ready: false,
-  corpus: [],
-  docsOriginal: [],
-  aliases: {},
-  aliasesCompiled: [],
-  fontes: { sources: {} }
-};
+const ALIASES_PATHS = [
+  path.join(ROOT, "config", "aliases.json"),
+  path.join(process.cwd(), "config", "aliases.json"),
+];
 
-function baseNormalize(s = "") {
-  return String(s).toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
-}
-function canonKey(k){ return baseNormalize(k); }
-function compileAliases(obj) {
-  const out = [];
-  const entries = Object.entries(obj).map(([k, arr]) => [canonKey(k), arr || []])
-    .sort((a,b) => b[0].length - a[0].length);
-  for (const [canon, vars] of entries) {
-    const all = new Set([canon, ...vars.map(baseNormalize)]);
-    for (const alt of all) {
-      const esc = alt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      out.push({ canon, re: new RegExp(`\\b${esc}\\b`, "g") });
+const STOP = new Set([
+  "a","as","o","os","de","da","do","das","dos","e","ou","em","no","na","nos","nas","um","uma","uns","umas",
+  "que","com","para","por","se","sobre","ao","à","às","aos","the","of","and","in","on","to","from","is","are","was","were",
+]);
+
+const norm = (s) =>
+  (s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/[^\p{L}\p{N}\s-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const tokenize = (s) => norm(s).split(" ").filter((t) => t && !STOP.has(t));
+
+// -------- load aliases --------
+function loadAliases() {
+  for (const p of ALIASES_PATHS) {
+    try {
+      if (fs.existsSync(p)) {
+        const raw = fs.readFileSync(p, "utf8");
+        const data = JSON.parse(raw);
+        // normaliza chaves e valores
+        const out = {};
+        for (const [k, arr] of Object.entries(data)) {
+          out[norm(k)] = Array.from(new Set([norm(k), ...arr.map(norm)]));
+        }
+        console.log("[INFO] Aliases loaded.");
+        return out;
+      }
+    } catch (e) {
+      console.warn("[WARN] Could not load aliases:", e.message);
     }
   }
-  return out;
+  console.log("[INFO] No aliases file; continuing without.");
+  return {};
 }
-function applyAliasesNormalized(normText) {
-  let out = normText;
-  for (const { canon, re } of STATE.aliasesCompiled) out = out.replace(re, canon);
-  return out;
-}
-function extractSubjectsFrom(normText) {
-  const found = new Set();
-  for (const { canon, re } of STATE.aliasesCompiled) { if (re.test(normText)) { found.add(canon); re.lastIndex = 0; } }
-  return Array.from(found).sort((a,b)=>b.length-a.length);
-}
-function prettySubject(s=""){
-  return s.split(" ").map(w => w.length<=3 ? (w==="idf"?"IDF":w.charAt(0).toUpperCase()+w.slice(1)) : w.charAt(0).toUpperCase()+w.slice(1)).join(" ");
-}
+const ALIASES = loadAliases();
 
-function fontesHintHosts(max=10){
-  try {
-    return (STATE.fontes.sources?.websites || [])
-      .map(f => new URL(f.url).hostname.replace(/^www\./,""))
-      .slice(0, max).join(", ");
-  } catch { return ""; }
-}
-
-function tagInside(lang){ return lang==="pt"?"Baseado no acervo": lang==="es"?"Basado en el acervo":"Based on the corpus"; }
-function tagOutsideText(lang){ return lang==="pt"?"Resposta geral (fora do acervo)": lang==="es"?"Respuesta general (fuera del acervo)":"General answer (outside the corpus)"; }
-function maybeLabelOutside(body, lang){ return (CONFIG.ANSWER_OUTSIDE_CORPUS ? `${tagOutsideText(lang)}:\n` : "") + body; }
-
-/** Inicializa corpus/aliases/fontes. */
-async function ensureReady() {
-  if (STATE.ready) return;
-  STATE.corpus = safeJson(corpusPath, []);
-  STATE.aliases = safeJson(aliasesPath, {});
-  STATE.fontes = safeJson(fontesPath, { sources: {} });
-
-  STATE.aliasesCompiled = compileAliases(STATE.aliases);
-  STATE.docsOriginal = STATE.corpus.map(e => `${e.title || ""}\n${e.text || ""}`);
-
-  STATE.ready = true;
-}
-
-/** Embeddings + helpers */
-async function embed(texts){
-  const r = await withTimeout(
-    openai.embeddings.create({ model: CONFIG.OPENAI_EMBED_MODEL, input: texts }),
-    CONFIG.OPENAI_TIMEOUT_MS
-  );
-  return r.data.map(e => e.embedding);
-}
-function cosine(a,b){ let dot=0,na=0,nb=0; for (let i=0;i<a.length;i++){ dot+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; } return dot/(Math.sqrt(na)*Math.sqrt(nb)+1e-9); }
-function normalize01(s){ return Math.max(0, Math.min(1, s)); }
-
-/** Ranking léxico robusto (sem OpenAI), com “assunto” como boost */
-function simpleTopK(qNorm, subject, k = 6) {
-  const qTokens = Array.from(new Set(qNorm.split(" ").filter(w => w.length > 2)));
-  const scores = STATE.docsOriginal.map((doc, index) => {
-    const entry = STATE.corpus[index] || {};
-    const dn = applyAliasesNormalized(baseNormalize(doc));
-    const tn = applyAliasesNormalized(baseNormalize(entry.title || ""));
-
-    // sobreposição: fração de tokens da pergunta presentes no doc
-    let overlap = 0;
-    for (const w of qTokens) if (dn.includes(w)) overlap += 1;
-    const overlapScore = qTokens.length ? (overlap / qTokens.length) : 0; // 0..1
-
-    // boost se o "assunto" (via aliases) estiver no título ou texto
-    const subj = (subject || "").toLowerCase();
-    const subjectHit = subj ? (dn.includes(subj) || tn.includes(subj)) : false;
-    const subjectBoost = subjectHit ? 0.5 : 0; // 0 ou 0.5
-
-    // bônus por título muito próximo do assunto
-    const titleBoost = subj && tn.startsWith(subj) ? 0.2 : 0;
-
-    const score = overlapScore + subjectBoost + titleBoost; // 0..1.7
-    return { index, score: normalize01(score), subjectHit };
-  });
-
-  return scores.sort((a, b) => b.score - a.score).slice(0, k);
-}
-
-export async function answerWithRAG(userQuery, lang="pt"){
-  await ensureReady();
-
-  if (!Array.isArray(STATE.corpus) || STATE.corpus.length===0) {
-    return { kind:"fallback", text: maybeLabelOutside("Nenhum item do acervo carregado.", lang), score: 0, subject: null };
-  }
-
-  const qNorm0 = baseNormalize(userQuery);
-  const qNorm = applyAliasesNormalized(qNorm0);
-  const qSubjects = extractSubjectsFrom(qNorm);
-  const subject = qSubjects.length ? prettySubject(qSubjects[0]) : null;
-
-  // >>> AQUI está a linha pedida (agora já alterada): <<<
-  const baseTop = simpleTopK(qNorm, subject, 6);
-
-  // Tenta embeddings; se falhar, fica só no ranking léxico
-  let embeds;
-  try { embeds = await embed([qNorm, ...baseTop.map(t => STATE.docsOriginal[t.index] || "")]); } catch {}
-
-  const accept = Math.max(0.35, Number(CONFIG.RAG_THRESHOLD || 0.5)); // nunca abaixo de 0.35
-
-  if (!embeds) {
-    const best = baseTop[0];
-    if (best && best.score >= accept) {
-      const entry = STATE.corpus[best.index];
-      const fontesTxt = entry?.sources?.length ? "\n\nFontes: " + entry.sources.map(s=>`• ${s}`).join("\n") : "";
-      const text = `${tagInside(lang)}:\n${(entry?.text || "").trim()}${fontesTxt}`;
-      return { kind:"corpus", text, score: best.score, subject };
+// -------- load corpus --------
+function loadCorpus() {
+  for (const p of CORPUS_PATHS) {
+    try {
+      if (fs.existsSync(p)) {
+        const raw = fs.readFileSync(p, "utf8");
+        const arr = JSON.parse(raw);
+        const docs = arr.map((d, idx) => {
+          const title = d.title || d.name || d.headline || "";
+          const text =
+            d.text || d.content || d.body || d.snippet || "";
+          const source = d.source || d.url || "corpus";
+          const date = d.date || d.published_at || "";
+          return {
+            id: d.id || `doc-${idx}`,
+            title,
+            text,
+            source,
+            date,
+            _titleN: norm(title),
+            _textN: norm(text),
+            _tokens: tokenize(`${title} ${text}`),
+          };
+        });
+        console.log(`[INFO] Corpus loaded: ${docs.length} items.`);
+        return docs;
+      }
+    } catch (e) {
+      console.warn("[WARN] Could not load corpus:", e.message);
     }
-    return await doFallback(userQuery, lang, subject, best?.score || 0);
   }
+  console.warn("[WARN] No corpus file found. RAG will always fallback.");
+  return [];
+}
+const CORPUS = loadCorpus();
 
-  const qEmb = embeds[0];
-  const cEmb = embeds.slice(1);
-  const semScores = cEmb.map(e => cosine(qEmb, e));
-  const combined = baseTop.map((t,i)=>({
-    index: t.index,
-    score: 0.5*normalize01(t.score) + 0.5*semScores[i]
-  })).sort((a,b)=>b.score-a.score);
+// -------- tf-idf index --------
+const DF = new Map();
+for (const d of CORPUS) {
+  const seen = new Set(d._tokens);
+  for (const t of seen) DF.set(t, (DF.get(t) || 0) + 1);
+}
+const N = CORPUS.length;
 
-  const best = combined[0];
-  if (best && best.score >= accept) {
-    const entry = STATE.corpus[best.index];
-    const fontesTxt = entry?.sources?.length ? "\n\nFontes: " + entry.sources.map(s=>`• ${s}`).join("\n") : "";
-    const text = `${tagInside(lang)}:\n${(entry?.text || "").trim()}${fontesTxt}`;
-    return { kind:"corpus", text, score: best.score, subject };
+// cosine via term weights
+function cosine(qv, dv) {
+  let dot = 0,
+    nq = 0,
+    nd = 0;
+  for (const [t, w] of qv) {
+    nq += w * w;
+    const wd = dv.get(t) || 0;
+    dot += w * wd;
   }
-
-  return await doFallback(userQuery, lang, subject, best?.score || 0);
+  for (const [, w] of dv) nd += w * w;
+  if (!dot || !nq || !nd) return 0;
+  return dot / (Math.sqrt(nq) * Math.sqrt(nd));
 }
 
-async function doFallback(userQuery, lang, subject, score = 0) {
-  const sys = {
-    pt: "Você é um assistente direto. Responda em português em até 1200 caracteres.",
-    es: "Eres un asistente directo. Responde en español en hasta 1200 caracteres.",
-    en: "You are a direct assistant. Answer in English in up to 1200 characters."
-  }[lang] || "Você é um assistente direto. Responda em português em até 1200 caracteres.";
-
-  const hosts = fontesHintHosts(10);
-  const extra = subject ? ` Contexto: a conversa atual é sobre ${subject}.` : "";
-  const messages = [
-    { role: "system", content: sys + (hosts ? ` Prefira fatos consistentes com: ${hosts}.` : "") + extra },
-    { role: "user", content: userQuery }
-  ];
-
-  try {
-    const comp = await withTimeout(
-      openai.chat.completions.create({ model: CONFIG.OPENAI_MODEL, messages, temperature: 0.4 }),
-      CONFIG.OPENAI_TIMEOUT_MS
-    );
-    const txt = comp.choices?.[0]?.message?.content?.trim() || "OK.";
-    return { kind: "fallback", text: maybeLabelOutside(txt, lang), score, subject };
-  } catch {
-    const msg = {
-      pt: "No momento não consegui consultar a fonte externa. Tente novamente em instantes.",
-      es: "En este momento no pude consultar la fuente externa. Intenta de nuevo en unos instantes.",
-      en: "I couldn’t reach the external source right now. Please try again shortly."
-    }[lang] || "No momento não consegui consultar a fonte externa. Tente novamente em instantes.";
-    return { kind: "fallback_error", text: maybeLabelOutside(msg, lang), score, subject };
+function vectorize(tokens) {
+  const tf = new Map();
+  tokens.forEach((t) => tf.set(t, (tf.get(t) || 0) + 1));
+  const vec = new Map();
+  for (const [t, f] of tf) {
+    const idf = Math.log(1 + (N || 1) / ((DF.get(t) || 0) + 1));
+    vec.set(t, f * idf);
   }
+  return vec;
 }
-export function search(query, options = {}) {
-  // ...
+
+// -------- helpers --------
+function applyAliases(q) {
+  const qn = norm(q);
+  let best = qn;
+  for (const [canon, variants] of Object.entries(ALIASES)) {
+    for (const v of variants) {
+      if (qn.includes(v)) {
+        best = qn.replace(new RegExp(`\\b${escapeReg(v)}\\b`, "g"), canon);
+      }
+    }
+  }
+  return best;
 }
+const escapeReg = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function titleBoostScore(doc, qn) {
+  // +0.15 se todas as palavras do “assunto” aparecerem no título
+  const qWords = qn.split(" ").filter(Boolean);
+  const hits = qWords.filter((w) => doc._titleN.includes(w)).length;
+  if (qWords.length && hits === qWords.length) return 0.15;
+  if (hits >= Math.max(1, Math.ceil(qWords.length * 0.6))) return 0.08;
+  return 0;
+}
+
+function simpleSemantic(qn, doc) {
+  // heurística leve: interseção de termos / comprimento
+  const qset = new Set(qn.split(" ").filter(Boolean));
+  const dset = new Set(doc._tokens);
+  let inter = 0;
+  for (const t of qset) if (dset.has(t)) inter++;
+  if (!qset.size) return 0;
+  const jacc = inter / (qset.size + dset.size - inter);
+  return jacc * 0.25; // cap baixo
+}
+
+function bestSentences(text, qn, max = 2) {
+  // split simples, sem lookbehind
+  const parts = (text || "").split(/[.!?]\s+/).map((s) => s.trim()).filter(Boolean);
+  const q = qn.split(" ").filter(Boolean);
+  const score = (s) => {
+    const sn = norm(s);
+    let c = 0;
+    for (const w of q) if (sn.includes(w)) c++;
+    return c + Math.min(sn.length / 400, 0.5); // leve preferência por frases completas
+  };
+  const ranked = parts
+    .map((s) => ({ s, sc: score(s) }))
+    .sort((a, b) => b.sc - a.sc)
+    .slice(0, max)
+    .map((x) => x.s.replace(/\s*$/, "."));
+  return ranked;
+}
+
+function guessSubject(qn) {
+  // pega o melhor “nome próprio” em aliases ou 1ª palavra relevante
+  for (const canon of Object.keys(ALIASES)) {
+    if (qn.includes(canon)) return canon;
+    for (const v of ALIASES[canon]) if (qn.includes(v)) return canon;
+  }
+  const words = qn.split(" ").filter((w) => w.length > 2 && !STOP.has(w));
+  return words[0] || qn;
+}
+
+// -------- principal --------
+export async function search(userQuery, options = {}) {
+  const threshold = Number(process.env.RAG_THRESHOLD || options.threshold || 0.4);
+
+  if (!CORPUS.length) {
+    return { pass: false, score: 0, subject: null, snippets: [], sources: [] };
+  }
+
+  // 1) aliases + normalização
+  const queryAliased = applyAliases(userQuery);
+  const qTokens = tokenize(queryAliased);
+  const qVec = vectorize(qTokens);
+  const qNorm = qTokens.join(" ");
+
+  // 2) pontuar docs
+  const scored = CORPUS.map((doc) => {
+    const dVec = vectorize(doc._tokens);
+    let sc = cosine(qVec, dVec);
+    sc += titleBoostScore(doc, qNorm);
+    sc += simpleSemantic(qNorm, doc);
+    return { doc, score: Math.min(1, sc) };
+  })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+
+  const top = scored[0];
+  const strongTitle = top && titleBoostScore(top.doc, qNorm) >= 0.08;
+
+  // 3) decide “pass”
+  const pass = top && (top.score >= threshold || strongTitle || top.score >= 0.18);
+
+  if (!pass) {
+    return {
+      pass: false,
+      score: top ? Number(top.score.toFixed(3)) : 0,
+      subject: null,
+      snippets: [],
+      sources: [],
+      resolvedQuery: userQuery,
+    };
+  }
+
+  // 4) montar resposta com 1–2 frases e fontes
+  const take = scored.slice(0, 3);
+  const snippets = take.flatMap(({ doc }) => bestSentences(doc.text, qNorm, 1)).slice(0, 3);
+  const sources = take.map(({ doc }) => ({
+    id: doc.id,
+    title: doc.title,
+    source: doc.source,
+    date: doc.date,
+  }));
+
+  const subject = guessSubject(qNorm);
+
+  return {
+    pass: true,
+    score: Number(top.score.toFixed(3)),
+    subject,
+    snippets,
+    sources,
+    resolvedQuery: userQuery,
+  };
+}
+
+// também exporta default para compatibilidade
+export default { search };
