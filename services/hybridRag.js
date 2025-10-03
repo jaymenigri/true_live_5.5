@@ -198,3 +198,6 @@ async function doFallback(userQuery, lang, subject, score = 0) {
     return { kind: "fallback_error", text: maybeLabelOutside(msg, lang), score, subject };
   }
 }
+export function search(query, options = {}) {
+  // ...
+}
