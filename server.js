@@ -1,199 +1,340 @@
-// server.js — True Live v2.7
-// - Mantém toda a lógica que já estava funcionando (RAG, fallback, Postgres, health, logs).
-// - Adiciona: Atualidade (web) via services/realtime.js e Multi-idioma automático.
-// - Sem dependências novas (usa fetch nativo do Node 20).
+// server.js — True Live v2.7 (definitivo, tolerante a exports do RAG)
+// - ACK imediato no WhatsApp para evitar timeout.
+// - Busca híbrida via services/hybridRag.js com fallback garantido.
+// - Memória de assunto por usuário (RAM + opcional Postgres com TTL).
+// - /admin/health com contagem do corpus e ping.
+// - Logs claros (INFO/WARN/ERROR), sem “recusas em branco”.
 
 import express from "express";
-import bodyParser from "body-parser";
-import fetch from "node-fetch"; // no Heroku Node 20, ok (seu package.json já inclui)
-import { search as hybridSearch } from "./services/hybridRag.js";
-import { getRealtimeAnswer, looksRecent } from "./services/realtime.js";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-// ---------------------- Config ----------------------
+// ---------- Ambiente ----------
 const {
-  PORT = 3000,
+  PORT,
   ADMIN_TOKEN = "truelive2025",
+  OPENAI_API_KEY,
   OPENAI_MODEL = "gpt-4o-mini",
-
-  // controles já existentes
+  OPENAI_TIMEOUT_MS = "10000",
   RAG_THRESHOLD = "0.4",
   ANSWER_OUTSIDE_CORPUS = "1",
   OFFTOPIC_MAX = "3",
   OFFTOPIC_COOLDOWN_MIN = "15",
+  LOG_LEVEL = "info",
 
-  // logs
-  LOG_LEVEL = "info"
+  // Twilio (para WhatsApp)
+  TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN,
+  TWILIO_WHATSAPP_FROM, // ex.: "whatsapp:+18706068686"
+
+  // Postgres (opcional)
+  DATABASE_URL,
 } = process.env;
 
-const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
-
-// ---------------------- Util ----------------------
-const log = (level, ...args) => {
-  const order = { error: 0, warn: 1, info: 2, debug: 3 };
-  const curr = order[(LOG_LEVEL || "info").toLowerCase()] ?? 2;
-  const want = order[level] ?? 2;
-  if (want <= curr) console[level](`[${level.toUpperCase()}]`, ...args);
+const CONFIG = {
+  PORT: Number(PORT) || 3000,
+  OPENAI_MODEL,
+  OPENAI_TIMEOUT_MS: Number(OPENAI_TIMEOUT_MS) || 10000,
+  RAG_THRESHOLD: Number(RAG_THRESHOLD) || 0.4,
+  ANSWER_OUTSIDE_CORPUS: ANSWER_OUTSIDE_CORPUS === "1" || ANSWER_OUTSIDE_CORPUS === "true",
+  OFFTOPIC_MAX: Number(OFFTOPIC_MAX) || 3,
+  OFFTOPIC_COOLDOWN_MIN: Number(OFFTOPIC_COOLDOWN_MIN) || 15,
+  LOG_LEVEL,
 };
 
-const nowIso = () => new Date().toISOString().replace(/\.\d+Z$/, "Z");
-
-// Idioma: detecção simples PT/EN/ES (sem libs).
-function detectLang(text) {
-  const t = (text || "").toLowerCase();
-  const pt = /(que|qual|como|onde|quando|por que|por quê|quem|esposa|capital|hoje|agora|fonte|acervo|resposta)/;
-  const es = /(qué|cuál|cómo|dónde|cuándo|por qué|esposa|capital|hoy|ahora|fuente|archivo|respuesta)/;
-  const en = /(what|who|where|when|why|how|wife|capital|today|now|source|corpus|answer)/;
-  if (pt.test(t)) return "pt";
-  if (es.test(t)) return "es";
-  if (en.test(t)) return "en";
-  // fallback: se contém acentos típicos do PT/ES, assume PT
-  if (/[áéíóúãõç]/.test(t)) return "pt";
-  return "pt";
+// ---------- Util de log ----------
+const levels = { error: 0, warn: 1, info: 2, debug: 3 };
+function log(level, ...args) {
+  if ((levels[level] ?? 2) <= (levels[CONFIG.LOG_LEVEL] ?? 2)) {
+    console.log(`[${level.toUpperCase()}]`, ...args);
+  }
 }
 
-// Produz “prefixos” de sistema para o gerador (mantém seu tom atual)
-function systemStyle(lang) {
-  const map = {
-    pt: "Responda de forma clara, concisa e didática, em português do Brasil. Se a resposta vier do acervo, cite as fontes no final.",
-    es: "Responde de forma clara, concisa y didáctica, en español. Si la respuesta viene del acervo, cita las fuentes al final.",
-    en: "Answer clearly, concisely and helpfully, in English. If the answer comes from the corpus, cite sources at the end."
-  };
-  return map[lang] || map.pt;
+// ---------- Resolução tolerante do RAG ----------
+import * as ragModule from "./services/hybridRag.js";
+const hybridSearch =
+  ragModule.search ||
+  ragModule.hybridSearch ||
+  (typeof ragModule.default === "function" ? ragModule.default : ragModule.default?.search);
+
+if (typeof hybridSearch !== "function") {
+  throw new Error(
+    "hybridRag.js: não encontrei a função de busca (search/hybridSearch/default)."
+  );
 }
 
-// ---------------------- Memória leve (em Ram) + “subject” ----------------------
-// Mantemos compatível com a versão que você já está usando (há suporte a Postgres em hybridRag.js).
-// Aqui guardamos apenas a última “entidade/assunto” por número.
-const SUBJECT_TTL_MS = 24 * 60 * 60 * 1000;
-const subjects = new Map(); // key = from, value = { subject, ts }
-function setSubject(from, subject) {
-  subjects.set(from, { subject, ts: Date.now() });
-}
-function getSubject(from) {
-  const x = subjects.get(from);
-  if (!x) return null;
-  if (Date.now() - x.ts > SUBJECT_TTL_MS) { subjects.delete(from); return null; }
-  return x.subject || null;
+// Opcional: tentar ler contagem do corpus no disco para o /health
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+let CORPUS_COUNT = 0;
+try {
+  const corpusPath = path.join(__dirname, "corpus", "corpus.json");
+  const buf = fs.readFileSync(corpusPath, "utf8");
+  const arr = JSON.parse(buf);
+  if (Array.isArray(arr)) CORPUS_COUNT = arr.length;
+  log("info", `Corpus loaded: ${CORPUS_COUNT} items.`);
+} catch (e) {
+  log("warn", "Não consegui ler corpus/corpus.json (somente para health):", e?.message);
 }
 
-// ---------------------- Health ----------------------
+// ---------- Twilio client (opcional) ----------
+let twilioClient = null;
+if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
+  const twilio = await import("twilio").then((m) => m.default || m);
+  twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+}
+
+// ---------- Postgres (opcional) ----------
+let pgPool = null;
+if (DATABASE_URL) {
+  try {
+    const pg = await import("pg").then((m) => m.default || m);
+    pgPool = new pg.Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
+    // criar tabela simples para “assunto” (memória de conversa)
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS tl_subject_memory (
+        id SERIAL PRIMARY KEY,
+        phone TEXT NOT NULL,
+        subject TEXT,
+        lang TEXT,
+        ts TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS tl_subject_memory_phone_idx ON tl_subject_memory (phone);
+    `);
+    log("info", "Postgres conectado.");
+  } catch (e) {
+    log("warn", "Postgres indisponível, seguindo sem persistência:", e?.message);
+    pgPool = null;
+  }
+}
+
+// ---------- Memória em RAM (sempre) ----------
+const mem = new Map(); // key: phone -> { subject, lang, ts }
+const SUBJECT_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+
+async function rememberSubject(phone, subject, lang) {
+  const rec = { subject: subject || null, lang: lang || "pt", ts: Date.now() };
+  mem.set(phone, rec);
+  if (pgPool) {
+    try {
+      await pgPool.query(
+        `INSERT INTO tl_subject_memory (phone, subject, lang) VALUES ($1,$2,$3)`,
+        [phone, subject || null, lang || "pt"]
+      );
+    } catch (e) {
+      log("warn", "Falha ao salvar subject no Postgres:", e?.message);
+    }
+  }
+}
+
+async function readSubject(phone) {
+  // RAM primeiro
+  const got = mem.get(phone);
+  if (got && Date.now() - got.ts < SUBJECT_TTL_MS) {
+    return { subject: got.subject, lang: got.lang };
+  }
+  // fallback Postgres (último registro)
+  if (pgPool) {
+    try {
+      const { rows } = await pgPool.query(
+        `SELECT subject, lang, ts FROM tl_subject_memory WHERE phone=$1 ORDER BY ts DESC LIMIT 1`,
+        [phone]
+      );
+      if (rows[0]) {
+        const r = rows[0];
+        return { subject: r.subject || null, lang: r.lang || "pt" };
+      }
+    } catch (e) {
+      log("warn", "Falha ao ler subject no Postgres:", e?.message);
+    }
+  }
+  return { subject: null, lang: "pt" };
+}
+
+// ---------- Fallback OpenAI ----------
+async function openaiFallback(userQuery, lang = "pt", subject = null) {
+  const sysPT =
+    "Você é um assistente direto. Responda em português em até 1200 caracteres.";
+  const sysEN = "You are a direct assistant. Answer in English in up to 1200 characters.";
+  const sysES = "Eres un asistente directo. Responde en español en hasta 1200 caracteres.";
+
+  const sys =
+    lang === "en" ? sysEN : lang === "es" ? sysES : sysPT;
+
+  const hosts =
+    "Prefira fatos consistentes; cite números com parcimônia; seja claro e conciso.";
+  const extra = subject ? ` Contexto: a conversa atual é sobre ${subject}.` : "";
+
+  const messages = [
+    { role: "system", content: `${sys} ${hosts}${extra}` },
+    { role: "user", content: userQuery },
+  ];
+
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), CONFIG.OPENAI_TIMEOUT_MS);
+
+  try {
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: CONFIG.OPENAI_MODEL,
+        messages,
+        temperature: 0.4,
+      }),
+    });
+    clearTimeout(to);
+    const json = await resp.json();
+    const txt = json?.choices?.[0]?.message?.content?.trim() || "OK.";
+    return { kind: "fallback", text: txt, sources: [], score: 0 };
+  } catch (e) {
+    clearTimeout(to);
+    const msgPT =
+      "No momento não consegui consultar a fonte externa. Tente novamente em instantes.";
+    return { kind: "fallback_error", text: msgPT, sources: [], score: 0 };
+  }
+}
+
+// ---------- Express ----------
+const app = express();
+// Twilio envia application/x-www-form-urlencoded
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
+
+// Health simples
+app.get("/health", (_req, res) => res.send("ok"));
+
+// Health com token e contagem de corpus
 app.get("/admin/health", (req, res) => {
-  const token = req.query.token || req.headers["x-admin-token"];
-  if (token !== ADMIN_TOKEN) return res.status(401).json({ ok: false, error: "unauthorized" });
-  const corpusItems = hybridSearch._count?.() ?? null;
-  res.json({
+  const token = req.query.token;
+  if (token !== ADMIN_TOKEN) return res.status(401).json({ status: "unauthorized" });
+  return res.json({
     status: "ok",
-    time: nowIso(),
-    corpus_items: corpusItems
+    corpus_items: CORPUS_COUNT,
+    time: new Date().toISOString(),
   });
 });
 
-// ---------------------- WhatsApp webhook ----------------------
-app.post("/twilio/whatsapp", async (req, res) => {
-  // ACK imediato pro Twilio
-  try { res.status(200).send(""); } catch { /* noop */ }
-
-  try {
-    const body = req.body || {};
-    const from = body.From || body.from || (body.WaId ? "whatsapp:+" + body.WaId : "unknown");
-    const text = (body.Body || body.body || "").trim();
-    const lang = detectLang(text);
-
-    // 1) Classificação leve de “recência”: se for “agora/hoje/tempo/clima”, vamos para Atualidade primeiro.
-    const recentIntent = looksRecent(text);
-
-    // 2) RAG híbrido (mantém seu comportamento atual)
-    const prevSubject = getSubject(from);
-    const { pass, score, answer, title, sources, resolvedQuery } = await hybridSearch({
-      query: text,
-      prevSubject,
-      threshold: Number(RAG_THRESHOLD)
-    });
-
-    if (pass) {
-      // guardamos o “assunto” para perguntas relacionais (“esposa dele”, “onde nasceu?”)
-      if (title) setSubject(from, title);
-
-      const head = lang === "es" ? "Basado en el acervo." :
-                   lang === "en" ? "Based on the corpus." :
-                                    "Baseado no acervo.";
-      const tail = sources && sources.length
-        ? (lang === "es" ? "Fuentes: " : (lang === "en" ? "Sources: " : "Fontes: ")) + sources.join(" | ")
-        : "";
-
-      await sendWhatsapp(from, [
-        answer,
-        "",
-        head,
-        tail
-      ].filter(Boolean).join("\n"));
-      log("info", "RAG result", { from, scope: "in", score: score.toFixed(3), prevSubject, resolvedQuery });
-      return;
-    }
-
-    // 3) Se NÃO passou no acervo:
-    // 3a) Se parece um pedido de atualidade, tentamos web primeiro
-    if (recentIntent) {
-      const web = await getRealtimeAnswer(text, lang);
-      if (web?.ok && web?.answer) {
-        await sendWhatsapp(from, web.answer + (web.citations ? `\n\n${web.citations}` : ""));
-        log("info", "REALTIME result", { from, scope: "out", reason: "recent-intent" });
-        return;
-      }
-    }
-
-    // 3b) Caso contrário (ou se web falhar), caímos no fallback geral (mantendo sua sinalização)
-    const generic = await generalAnswer(text, lang);
-    const footer = Number(ANSWER_OUTSIDE_CORPUS) ? (lang === "es" ? "Respuesta general (fuera del acervo)." :
-                                                    lang === "en" ? "General answer (outside the corpus)." :
-                                                                     "Resposta geral (fora do acervo).") : "";
-    await sendWhatsapp(from, [generic, footer].filter(Boolean).join("\n\n"));
-    log("info", "FALLBACK result", { from, scope: "out", score: score.toFixed(3) });
-  } catch (err) {
-    log("error", "Webhook error", err);
+// ---------- Util WhatsApp ----------
+async function sendWhatsApp(to, body) {
+  if (!twilioClient || !TWILIO_WHATSAPP_FROM) {
+    log("warn", "Twilio OFF (mensagem não enviada). Body:", body?.slice?.(0, 120));
+    return;
   }
+  try {
+    await twilioClient.messages.create({
+      from: TWILIO_WHATSAPP_FROM,
+      to,
+      body,
+    });
+  } catch (e) {
+    log("error", "Falha ao enviar WhatsApp:", e?.message);
+  }
+}
+
+// ACK rápido
+async function sendAck(to) {
+  const check = "✅";
+  const body = `${check} Received, thinking...`;
+  await sendWhatsApp(to, body);
+}
+
+// Detecta idioma simples
+function detectLang(txt = "") {
+  const s = (txt || "").toLowerCase();
+  if (/[áéíóúãõç]/.test(s) || /que|quem|onde|como|por que/.test(s)) return "pt";
+  if (/¿|¡/.test(s) || /\b(dónde|qué|quién|cómo)\b/.test(s)) return "es";
+  return "en";
+}
+
+// ---------- Webhook do WhatsApp ----------
+app.post("/twilio/whatsapp", async (req, res) => {
+  // Responde 200 imediatamente (ACK HTTP para Twilio)
+  res.status(200).send("");
+
+  const from = req.body?.From || req.body?.from || "";
+  const to = req.body?.To || req.body?.to || "";
+  const body = (req.body?.Body || req.body?.body || "").trim();
+  if (!from || !body) {
+    log("warn", "Webhook sem From/Body. Ignorando.");
+    return;
+  }
+
+  // ACK via WhatsApp (para o usuário ver que recebemos)
+  sendAck(from).catch(() => {});
+
+  // Recupera último assunto/idioma
+  const last = await readSubject(from);
+  const lang = detectLang(body) || last.lang || "pt";
+
+  // Chama o RAG híbrido
+  let result;
+  try {
+    result = await hybridSearch(body, {
+      threshold: CONFIG.RAG_THRESHOLD,
+      lang,
+      prevSubject: last.subject,
+    });
+  } catch (e) {
+    log("error", "Erro no hybridSearch:", e?.message);
+    result = null;
+  }
+
+  // Formatação final
+  let finalText = "";
+  let decidedSubject = last.subject || null;
+
+  if (result && (result.kind === "corpus" || (result.score ?? 0) >= CONFIG.RAG_THRESHOLD)) {
+    // Resposta do acervo
+    const sources = Array.isArray(result.sources) ? result.sources : [];
+    const srcLine =
+      sources.length
+        ? `\n\nBaseado no acervo.\nFontes: ${sources
+            .map((s) => (s?.title ? s.title : s?.id || "corpus"))
+            .join(" | ")}`
+        : `\n\nBaseado no acervo.`;
+
+    finalText = `${result.text?.trim() || "OK."}${srcLine}`;
+    decidedSubject = result.subject || decidedSubject;
+
+  } else {
+    // Fallback geral — NUNCA recusar
+    const fb = await openaiFallback(body, lang, last.subject);
+    finalText = fb.text?.trim() || "OK.";
+    if (CONFIG.ANSWER_OUTSIDE_CORPUS) {
+      const tag =
+        lang === "en"
+          ? "\n\nGeneral answer (outside the curated corpus)."
+          : lang === "es"
+          ? "\n\nRespuesta general (fuera del acervo)."
+          : "\n\nResposta geral (fora do acervo).";
+      finalText += tag;
+    }
+  }
+
+  // Memoriza novo “assunto” se houver no resultado
+  if (result?.subject) {
+    await rememberSubject(from, result.subject, lang).catch(() => {});
+  }
+
+  // Envia resposta final
+  await sendWhatsApp(from, finalText);
+  log("info", "RAG result", {
+    from,
+    scope: result?.kind === "corpus" ? "in" : "out",
+    score: (result?.score ?? 0).toFixed(3),
+    prevSubject: last.subject || null,
+    resolvedQuery: body,
+  });
 });
 
-// ---------------------- Gerador (usa seu modelo atual) ----------------------
-async function generalAnswer(userText, lang) {
-  // Usa o seu próprio modelo via OpenAI API que você já tem embutido no projeto.
-  // Aqui mantemos simples para não mexer nas dependências atuais.
-  const sys = systemStyle(lang);
-  const prompt = `${sys}\nPergunta: ${userText}`;
-  // Você já possui services/openaiClient.js; se preferir, enquadre aqui.
-  // Para manter o arquivo autocontido, usamos a API REST diretamente.
-  const key = process.env.OPENAI_API_KEY;
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      messages: [
-        { role: "system", content: sys },
-        { role: "user", content: userText }
-      ],
-      temperature: 0.3
-    })
-  }).then(r => r.json()).catch(() => null);
-
-  const txt = resp?.choices?.[0]?.message?.content?.trim();
-  return txt || (lang === "en" ? "Sorry, I had a technical issue." :
-                 lang === "es" ? "Perdón, tuve un problema técnico." :
-                                  "Desculpe, tive um problema técnico.");
-}
-
-// ---------------------- Envia WhatsApp (resposta de texto) ----------------------
-async function sendWhatsapp(to, message) {
-  // Você já tem esse envio OK no seu app (responder via Twilio “Message Response”).
-  // Aqui mantemos a resposta “server-push” se for necessário.
-  // Se o seu fluxo atual envia a partir do Twilio Studio/Webhook direto, pode ignorar.
-  // (Mantido vazio de propósito para não duplicar envio.)
-  return;
-}
-
-// ---------------------- Start ----------------------
-app.listen(PORT, () => {
-  log("info", "Server up", { port: String(PORT), corpus_items: hybridSearch._count?.() ?? null });
+// ---------- Sobe o servidor ----------
+app.listen(CONFIG.PORT, () => {
+  log("info", "Server up", { port: String(CONFIG.PORT), corpus_items: CORPUS_COUNT });
 });
