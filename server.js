@@ -6,7 +6,7 @@
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch"; // no Heroku Node 20, ok (seu package.json já inclui)
-import { hybridSearch } from "./services/hybridRag.js";
+import hybridSearch from "./services/hybridRag.js";
 import { getRealtimeAnswer, looksRecent } from "./services/realtime.js";
 
 // ---------------------- Config ----------------------
