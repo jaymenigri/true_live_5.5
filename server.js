@@ -1,5 +1,8 @@
-// server.js — True Live v2.9.2 (final)
-// Diferença vs v2.9.1: proteção para NÃO zerar o corpus gerado quando ingestão adiciona 0 itens.
+// server.js — True Live v2.9.3 (final)
+// Fixes:
+// 1) Coreferência no RAG: reforça a query com o assunto atual quando há pronomes (“sua/esposa dele/etc.”).
+// 2) Assunto explícito fora do corpus: grava “Latvia/Letônia”, etc., mesmo sem RAG, e usa na próxima pergunta.
+// 3) Não herda assunto antigo quando uma nova entidade/country aparece na pergunta atual.
 
 import express from "express";
 import bodyParser from "body-parser";
@@ -25,7 +28,7 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "truelive2025";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const ANSWER_OUTSIDE = String(process.env.ANSWER_OUTSIDE_CORPUS || "1") === "1";
-const APP_VERSION = process.env.APP_VERSION || "v2.9.2";
+const APP_VERSION = process.env.APP_VERSION || "v2.9.3";
 const RAG_THRESHOLD = Number(process.env.RAG_THRESHOLD || "0.4");
 const WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || null;
 
@@ -147,6 +150,42 @@ function detectLang(s) {
   return "en";
 }
 
+// Heurística de coreferência: pergunta com pronomes/anáforas?
+function isCorefQuestion(q) {
+  const n = (q || "").toLowerCase();
+  return /\b(ele|ela|dele|dela|seu|sua|seus|suas|lá|isso|aquilo)\b/.test(n);
+}
+
+// Detecta assunto explícito (país/entidade) mesmo fora do corpus
+function explicitSubject(q) {
+  const n = (q || "").toLowerCase();
+
+  // Países e entidades comuns (pode expandir depois)
+  const MAP = [
+    ["letônia", "Letônia"],
+    ["latvia", "Letônia"],
+    ["lituânia", "Lituânia"],
+    ["lithuania", "Lituânia"],
+    ["israel", "Israel"],
+    ["faixa de gaza", "Faixa de Gaza"],
+    ["gaza", "Faixa de Gaza"],
+    ["cisjordânia", "Cisjordânia"],
+    ["west bank", "Cisjordânia"],
+    ["jerusalém", "Jerusalém"],
+    ["jerusalem", "Jerusalém"],
+    ["ben-gurion", "David Ben-Gurion"],
+    ["ben gurion", "David Ben-Gurion"],
+    ["golda meir", "Golda Meir"],
+    ["itzhak rabin", "Itzhak Rabin"],
+    ["yitzhak rabin", "Itzhak Rabin"]
+  ];
+
+  for (const [k, v] of MAP) {
+    if (n.includes(k)) return v;
+  }
+  return null;
+}
+
 async function waSend(to, text) {
   if (!twilioClient || !WHATSAPP_FROM) return;
   try {
@@ -190,7 +229,7 @@ async function runIngestHandler(req, res) {
   try {
     const r = await ingestAll({ modes, maxPerDomain: max });
 
-    // *** PROTEÇÃO: só atualiza o corpus em memória se houver novos itens ***
+    // Proteção: só atualiza o corpus gerado se houver novos itens
     if (r && r.added > 0) {
       const fresh = tryLoadGenerated();
       if (Array.isArray(fresh) && fresh.length) {
@@ -241,7 +280,13 @@ async function handleIncoming(req, res) {
   res.sendStatus(200);
 
   try {
-    // 0) Atualidade
+    // 0) Atualizar assunto explícito (mesmo fora do corpus)
+    const explicit = explicitSubject(msg);
+    if (explicit) {
+      await setSubject(from, explicit);
+    }
+
+    // 1) Atualidade (feeds confiáveis)
     try {
       const live = await maybeAnswerRealtime(msg, lang);
       if (live && live.ok) {
@@ -258,11 +303,23 @@ async function handleIncoming(req, res) {
       }
     } catch {}
 
-    // 1) RAG (corpus)
-    const rag = await hybridSearch(msg, { threshold: RAG_THRESHOLD });
+    // 2) RAG (corpus) — com coreferência
+    const prev = await getSubject(from);
+    const useCoref = isCorefQuestion(msg);
+    const ragQuery =
+      // se houver entidade explícita agora, não poluo a query com assunto antigo
+      explicit ? msg : (useCoref && prev ? `${msg} (referente a: ${prev})` : msg);
+
+    const rag = await hybridSearch(ragQuery, { threshold: RAG_THRESHOLD });
 
     if (rag?.pass) {
-      if (rag.subject) await setSubject(from, rag.subject);
+      // Se o RAG identificou um subject, atualiza; senão, mantém o explicit/prev
+      if (rag.subject) {
+        await setSubject(from, rag.subject);
+      } else if (explicit) {
+        await setSubject(from, explicit);
+      }
+
       const fontes = (rag.sources || [])
         .map((s) => s.title || s.id)
         .filter(Boolean)
@@ -289,25 +346,26 @@ async function handleIncoming(req, res) {
       console.log("[INFO] RAG result", {
         scope: "in",
         score: rag.score,
-        resolvedQuery: msg,
+        resolvedQuery: ragQuery,
       });
       return;
     }
 
-    // 2) Fallback
-    const prev = await getSubject(from);
+    // 3) Fallback (sempre responde)
+    const subjectForFb = explicit || (useCoref ? await getSubject(from) : null);
     const prefix =
       lang === "pt"
-        ? prev
-          ? `Assunto atual: ${prev}. `
+        ? subjectForFb
+          ? `Assunto atual: ${subjectForFb}. `
           : ""
         : lang === "es"
-        ? prev
-          ? `Tema actual: ${prev}. `
+        ? subjectForFb
+          ? `Tema actual: ${subjectForFb}. `
           : ""
-        : prev
-        ? `Current subject: ${prev}. `
+        : subjectForFb
+        ? `Current subject: ${subjectForFb}. `
         : "";
+
     const fb = await openaiAnswer(`${prefix}${msg}`, lang);
     const tail = ANSWER_OUTSIDE
       ? lang === "pt"
@@ -320,7 +378,7 @@ async function handleIncoming(req, res) {
     console.log("[INFO] RAG result", {
       scope: "out",
       score: rag?.score ?? 0,
-      resolvedQuery: msg,
+      resolvedQuery: ragQuery,
     });
   } catch (e) {
     console.error("[ERROR] handler:", e);
