@@ -8,7 +8,9 @@ import fetch from "node-fetch";
 import fs from "fs";
 
 import { extractMainText } from "./htmlExtract.js";
-import whitelist from "../config/whitelist.json" assert { type: "json" };
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const whitelist = require("../config/whitelist.json");
 
 const TIMEOUT_MS = 8000;
 
