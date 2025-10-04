@@ -1,6 +1,6 @@
 // services/realtime.js — v1.1
-// “Atualidade”: usa RSS de fontes whitelisted para responder perguntas do tipo “agora/hoje/quantos reféns?”.
-// Se achar manchetes relevantes, responde imediatamente; senão, retorna null e o fluxo segue (RAG/fallback).
+// “Atualidade”: responde perguntas do tipo “agora/hoje/quantos reféns?” usando RSS whitelisted.
+// Se achar manchetes relevantes, responde imediatamente; senão, retorna null.
 
 import fs from "fs";
 import path from "path";
@@ -25,6 +25,7 @@ function loadWhitelist() {
       return JSON.parse(fs.readFileSync(p, "utf8"));
     } catch {}
   }
+  // fallback mínimo
   return {
     rss: {
       "timesofisrael.com": ["https://www.timesofisrael.com/feed/"],
@@ -55,7 +56,6 @@ function looksLive(q) {
   return LIVE_PATTERNS.some((p) => n.includes(p));
 }
 
-// timeout real com AbortController
 async function fetchText(url) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), 12000);
@@ -82,7 +82,7 @@ function itemToCard(it) {
   return { title: String(title), description: String(desc || ""), link: String(link || ""), date: String(date || "") };
 }
 
-function keepRelevant(card, _q) {
+function keepRelevant(card, q) {
   const nT = norm(card.title);
   const nD = norm(card.description);
   const hits = ["refen","reféns","refem","hostage","gaza","israel","ataque","rocket","kibbutz","idf","hamas","hezbollah","fronteira","cativeiro","troca"].filter(w =>
@@ -118,8 +118,8 @@ export async function maybeAnswerRealtime(query, lang = "pt") {
     return t + hot * 1000 * 60;
   };
   cards.sort((a, b) => score(b) - score(a));
-  const top = cards.slice(0, 2);
 
+  const top = cards.slice(0, 2);
   const bullets = top.map((c) => {
     let host = "";
     try { host = new URL(c.link).hostname.replace(/^www\./,""); } catch {}
