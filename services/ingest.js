@@ -1,4 +1,4 @@
-// services/ingest.js — ingestor RSS/Sitemap (no-browser, sem terminal)
+// services/ingest.js — ingestor RSS/Sitemap
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -29,20 +29,14 @@ function loadWhitelist() {
 const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 
 function normUrl(u="") {
-  try {
-    return new URL(u).toString();
-  } catch {
-    return "";
-  }
+  try { return new URL(u).toString(); } catch { return ""; }
 }
-
 function sameDomain(u, domain) {
   try {
     const h = new URL(u).hostname.replace(/^www\./, "");
     return h.endsWith(domain);
   } catch { return false; }
 }
-
 function allowedPath(u, allowPaths=[], denyPatterns=[]) {
   try {
     const url = new URL(u);
@@ -52,13 +46,11 @@ function allowedPath(u, allowPaths=[], denyPatterns=[]) {
     return true;
   } catch { return false; }
 }
-
 async function fetchText(url) {
   const r = await fetch(url, { redirect: "follow", timeout: 15000 });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return await r.text();
 }
-
 function chunkIntoSentences(text, maxLen = 420) {
   const parts = (text || "").split(/[.!?]\s+/).map(s => s.trim()).filter(Boolean);
   const out = [];
@@ -81,7 +73,7 @@ export async function ingestAll({ modes = ["rss","sitemap"], maxPerDomain = 120 
   const domainsRss = Object.entries(wl.rss || {});
   const domainsSm  = Object.entries(wl.sitemap || {});
 
-  // --- RSS ---
+  // RSS
   if (modes.includes("rss")) {
     for (const [domain, feeds] of domainsRss) {
       let count = 0;
@@ -114,12 +106,12 @@ export async function ingestAll({ modes = ["rss","sitemap"], maxPerDomain = 120 
             seen.add(link);
             count++;
           }
-        } catch { /* segue o baile */ }
+        } catch { /* segue */ }
       }
     }
   }
 
-  // --- SITEMAP ---
+  // SITEMAP
   if (modes.includes("sitemap")) {
     for (const [domain, maps] of domainsSm) {
       let count = 0;
@@ -130,7 +122,6 @@ export async function ingestAll({ modes = ["rss","sitemap"], maxPerDomain = 120 
           const xml = await fetchText(smUrl);
           const data = parser.parse(xml);
 
-          // pode ser índice de sitemaps
           const locs = []
             .concat(data?.sitemapindex?.sitemap || [])
             .concat(data?.urlset?.url || []);
@@ -143,10 +134,8 @@ export async function ingestAll({ modes = ["rss","sitemap"], maxPerDomain = 120 
 
             const link = normUrl(loc);
             if (!link || !sameDomain(link, domain)) continue;
-            if (!allowedPath(link, allow, deny)) continue;
+            if (!allowedPath(link, (wl.allow_paths || []), (wl.deny_patterns || []))) continue;
             if (seen.has(link)) continue;
-
-            // se for sub-sitemap (termina com .xml), pula (já cobrimos no índice)
             if (link.endsWith(".xml")) continue;
 
             const html = await fetchText(link);
@@ -165,12 +154,11 @@ export async function ingestAll({ modes = ["rss","sitemap"], maxPerDomain = 120 
             seen.add(link);
             count++;
           }
-        } catch { /* ignora sitemap ruim */ }
+        } catch { /* ignora */ }
       }
     }
   }
 
-  // Salva em /tmp e retorna
   try { fs.writeFileSync(SAVE_PATH, JSON.stringify(out, null, 2), "utf8"); } catch {}
   return { added: out.length, file: SAVE_PATH };
 }
