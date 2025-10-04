@@ -1,4 +1,4 @@
-// server.js — True Live v2.9.0 (final)
+// server.js — True Live v2.9.1 (final)
 // Recursos: RAG v3 + Fallback + Memória (Postgres) + Twilio + Health + Ingestão + Atualidade (realtime)
 // Rotas admin: /admin/health, /admin/ingest/run (GET/POST), /admin/ingest/status
 // Webhooks: /twilio/whatsapp (oficial) e /whatsapp (alias)
@@ -27,7 +27,7 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "truelive2025";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const ANSWER_OUTSIDE = String(process.env.ANSWER_OUTSIDE_CORPUS || "1") === "1";
-const APP_VERSION = process.env.APP_VERSION || "v2.9.0";
+const APP_VERSION = process.env.APP_VERSION || "v2.9.1";
 const RAG_THRESHOLD = Number(process.env.RAG_THRESHOLD || "0.4");
 const WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || null;
 
@@ -50,7 +50,6 @@ try {
 } catch {}
 let GENERATED = tryLoadGenerated(); // corpus gerado em /tmp
 let CORPUS_ITEMS = (BASE_CORPUS?.length || 0) + (GENERATED?.length || 0);
-
 console.log("[INFO] Corpus (base + gerado):", CORPUS_ITEMS, "items.");
 
 // ---------- Memória (RAM + Postgres) ----------
