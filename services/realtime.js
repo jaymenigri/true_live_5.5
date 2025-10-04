@@ -1,155 +1,135 @@
-// services/realtime.js — Atualidade “lite” sem chaves
-// - Clima: Open-Meteo (sem API key) + geocoding Open-Meteo
-// - Wikipédia: resumo rápido da entidade (útil p/ “quem é X?” fora do acervo)
-// - Manchetes: Reuters/BBC via RSS (títulos + links)
-// - Heurística looksRecent: decide quando tentar “web” primeiro
+// services/realtime.js — v1.0
+// “Atualidade”: usa RSS de fontes whitelisted para responder perguntas do tipo “agora/hoje/quantos reféns?”.
+// Se achar manchetes relevantes, responde imediatamente; senão, retorna null e o fluxo segue (RAG/fallback).
 
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import fetch from "node-fetch";
+import { XMLParser } from "fast-xml-parser";
 
-// --------- Heurística de “recência” ----------
-export function looksRecent(q) {
-  const t = (q || "").toLowerCase();
-  return /agora|hoje|últimas|ultimas|agendada|previs[aã]o|clima|tempo|weather|breaking|atual|atualiza|not[ií]cia|news|ref[eé]ns|refe[ns]/.test(t);
-}
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ROOT = path.join(__dirname, "..");
+const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 
-// --------- Orquestrador ----------
-export async function getRealtimeAnswer(query, lang = "pt") {
-  const q = (query || "").trim();
+const WL_PATHS = [
+  path.join(ROOT, "config", "whitelist.json"),
+  path.join(process.cwd(), "config", "whitelist.json"),
+];
 
-  // 1) Clima
-  if (/(clima|tempo|weather|temperatura)/i.test(q)) {
-    const city = extractCity(q);
-    if (city) {
-      const wx = await weatherForCity(city, lang);
-      if (wx?.ok) return wx;
+function loadWhitelist() {
+  for (const p of WL_PATHS) {
+    try {
+      if (!fs.existsSync(p)) continue;
+      return JSON.parse(fs.readFileSync(p, "utf8"));
+    } catch {}
+  }
+  return {
+    rss: {
+      "timesofisrael.com": ["https://www.timesofisrael.com/feed/"],
+      "jpost.com": ["https://www.jpost.com/Rss/RssFeedsFrontPage.aspx"],
+      "jns.org": ["https://www.jns.org/feed/"]
     }
-  }
-
-  // 2) Wikipédia (entity summary)
-  if (/^(quem|qu[ié]n|who|what)\b/i.test(q) || /\b(what is|who is|who was|qué es|quem é|quem foi)\b/i.test(q)) {
-    const title = extractEntity(q);
-    if (title) {
-      const wk = await wikipediaSummary(title, lang);
-      if (wk?.ok) return wk;
-    }
-  }
-
-  // 3) Manchetes
-  if (/not[ií]cia|news|últimas|ultimas|agora|breaking/i.test(q)) {
-    const hd = await topHeadlines(lang);
-    if (hd?.ok) return hd;
-  }
-
-  return { ok: false };
+  };
 }
 
-// --------- Helpers de parsing ----------
-function extractCity(q) {
-  // pega o trecho após “em|in|en …” no final da frase, ex: “tempo em São Paulo”
-  const m = q.match(/\b(?:em|in|en)\s+([A-ZÁÂÃÉÊÍÓÔÕÚÇ][\w\-\’'ºª\s]+)$/i);
-  return m ? m[1].trim().replace(/[?!.]+$/, "") : null;
-}
+const WL = loadWhitelist();
 
-function extractEntity(q) {
-  // remove “quem/what/who …” do começo
-  let s = q
-    .replace(/^(quem foi|quem [ée]|\bwho is\b|\bwho was\b|\bwhat is\b|\bqué es\b|\bqu[ié]n es\b)\s+/i, "")
-    .replace(/[?!.]+$/, "")
+const LIVE_PATTERNS = [
+  "agora", "hoje", "últimas", "ultimas", "atual", "atualizado",
+  "quantos refens", "quantos reféns", "hostages", "refens", "reféns",
+  "últimas notícias", "breaking", "update", "número atual", "numero atual"
+];
+
+const norm = (s) =>
+  (s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/\s+/g, " ")
     .trim();
-  // capitaliza primeira letra se vier toda minúscula
-  if (/^[a-záéíóúñçãõ]/.test(s)) s = s.charAt(0).toUpperCase() + s.slice(1);
-  return s;
+
+function looksLive(q) {
+  const n = norm(q);
+  return LIVE_PATTERNS.some((p) => n.includes(p));
 }
 
-// --------- Clima (Open-Meteo) ----------
-async function weatherForCity(city, lang) {
-  try {
-    const geo = await fetch(
-      `https://geocoding-api.open-meteo.com/v1/search?count=1&name=${encodeURIComponent(city)}`
-    ).then(r => r.json());
-
-    const p = geo?.results?.[0];
-    if (!p) return { ok: false };
-
-    const { latitude, longitude, name, country } = p;
-    const wx = await fetch(
-      `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m`
-    ).then(r => r.json());
-
-    const c = wx?.current || {};
-    const temp = typeof c.temperature_2m === "number" ? Math.round(c.temperature_2m) : null;
-    const hum = c.relative_humidity_2m;
-    const wind = c.wind_speed_10m;
-
-    const text =
-      lang === "es"
-        ? `Tiempo actual en ${name}, ${country}: temperatura ${temp}°C, humedad ${hum}%, viento ${wind} km/h.`
-        : lang === "en"
-        ? `Current weather in ${name}, ${country}: temperature ${temp}°C, humidity ${hum}%, wind ${wind} km/h.`
-        : `Clima agora em ${name}, ${country}: temperatura ${temp}°C, umidade ${hum}%, vento ${wind} km/h.`;
-
-    const cite =
-      lang === "es" ? "Fuente: Open-Meteo." :
-      lang === "en" ? "Source: Open-Meteo." :
-      "Fonte: Open-Meteo.";
-
-    return { ok: true, answer: text, citations: cite };
-  } catch {
-    return { ok: false };
-  }
+async function fetchText(url) {
+  const r = await fetch(url, { timeout: 12000, redirect: "follow" });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return await r.text();
 }
 
-// --------- Wikipédia (summary) ----------
-async function wikipediaSummary(title, lang) {
-  try {
-    const langCode = lang === "en" ? "en" : lang === "es" ? "es" : "pt";
-    const url = `https://${langCode}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`;
-    const j = await fetch(url, { headers: { accept: "application/json" } }).then(r => r.json());
-    const extract = j?.extract || j?.description;
-    if (!extract) return { ok: false };
-
-    const cite =
-      lang === "es" ? "Fuente: Wikipedia." :
-      lang === "en" ? "Source: Wikipedia." :
-      "Fonte: Wikipédia.";
-
-    return { ok: true, answer: extract, citations: cite };
-  } catch {
-    return { ok: false };
-  }
+function parseRss(xml) {
+  const d = parser.parse(xml);
+  const items = d?.rss?.channel?.item || d?.feed?.entry || [];
+  return Array.isArray(items) ? items : [items];
 }
 
-// --------- Manchetes (Reuters + BBC via RSS) ----------
-async function topHeadlines(lang) {
-  try {
-    const feeds = [
-      "https://feeds.reuters.com/reuters/worldNews",
-      "https://feeds.bbci.co.uk/news/world/rss.xml"
-    ];
+function itemToCard(it) {
+  const link = it.link?.href || it.link || it.guid || "";
+  const title = it.title?.["#text"] || it.title || "(sem título)";
+  const desc = it.description || it.summary || "";
+  const date = it.pubDate || it.updated || "";
+  return { title: String(title), description: String(desc || ""), link: String(link || ""), date: String(date || "") };
+}
 
-    const items = [];
-    for (const f of feeds) {
-      const xml = await fetch(f).then(r => r.text());
-      // Extração simples de <item><title> / <link>
-      const re = /<item>[\s\S]*?<title>([\s\S]*?)<\/title>[\s\S]*?<link>([\s\S]*?)<\/link>/gi;
-      let m; let take = 0;
-      while ((m = re.exec(xml)) && take < 3) {
-        const title = m[1].replace(/<!\[CDATA\[|\]\]>/g, "").trim();
-        const link = m[2].trim();
-        items.push(`• ${title} — ${link}`);
-        take++;
+function keepRelevant(card, q) {
+  const nQ = norm(q);
+  const nT = norm(card.title);
+  const nD = norm(card.description);
+  const hits = ["refen","reféns","refem","hostage","gaza","israel","ataque","rocket","kibbutz","idf","hamas","hezbollah","fronteira","cativeiro","troca"].filter(w =>
+    nT.includes(w) || nD.includes(w)
+  ).length;
+  return hits >= 1 || nT.includes("breaking") || nT.includes("live");
+}
+
+export async function maybeAnswerRealtime(query, lang = "pt") {
+  if (!looksLive(query)) return null;
+
+  const feeds = Object.values(WL.rss || {}).flat().slice(0, 12);
+  const cards = [];
+
+  for (const url of feeds) {
+    try {
+      const xml = await fetchText(url);
+      const items = parseRss(xml);
+      for (const it of items.slice(0, 15)) {
+        const c = itemToCard(it);
+        if (keepRelevant(c, query)) cards.push(c);
       }
+    } catch {
+      // ignora feed com erro
     }
-
-    if (!items.length) return { ok: false };
-
-    const head =
-      lang === "es" ? "Titulares recientes:" :
-      lang === "en" ? "Latest headlines:" :
-      "Manchetes recentes:";
-
-    return { ok: true, answer: [head, "", ...items].join("\n") };
-  } catch {
-    return { ok: false };
   }
+
+  if (!cards.length) return null;
+
+  const score = (c) => {
+    const t = Date.parse(c.date || "") || 0;
+    const hot = /refe(ns|m|ns)|hostage/i.test(c.title) ? 1 : 0;
+    return t + hot * 1000 * 60;
+  };
+  cards.sort((a, b) => score(b) - score(a));
+  const top = cards.slice(0, 2);
+  const bullets = top.map((c) => `• ${c.title} — ${new URL(c.link).hostname.replace(/^www\./,"")}`);
+
+  const header =
+    lang === "pt" ? "Atualização recente (fontes confiáveis):"
+    : lang === "es" ? "Actualización reciente (fuentes confiables):"
+    : "Recent update (trusted sources):";
+
+  const tail =
+    lang === "pt" ? "\n\nObs.: números podem mudar rapidamente; consulte as fontes listadas."
+    : lang === "es" ? "\n\nNota: los números pueden cambiar rápidamente; consulte las fuentes."
+    : "\n\nNote: numbers can change quickly; check the sources.";
+
+  return {
+    ok: true,
+    text: `${header}\n${bullets.join("\n")}${tail}`,
+    sources: top.map((c) => c.link)
+  };
 }
+
+export default { maybeAnswerRealtime };
