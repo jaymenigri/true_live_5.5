@@ -1,7 +1,5 @@
-// server.js — True Live v2.9.1 (final)
-// Recursos: RAG v3 + Fallback + Memória (Postgres) + Twilio + Health + Ingestão + Atualidade (realtime)
-// Rotas admin: /admin/health, /admin/ingest/run (GET/POST), /admin/ingest/status
-// Webhooks: /twilio/whatsapp (oficial) e /whatsapp (alias)
+// server.js — True Live v2.9.2 (final)
+// Diferença vs v2.9.1: proteção para NÃO zerar o corpus gerado quando ingestão adiciona 0 itens.
 
 import express from "express";
 import bodyParser from "body-parser";
@@ -27,11 +25,10 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "truelive2025";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const ANSWER_OUTSIDE = String(process.env.ANSWER_OUTSIDE_CORPUS || "1") === "1";
-const APP_VERSION = process.env.APP_VERSION || "v2.9.1";
+const APP_VERSION = process.env.APP_VERSION || "v2.9.2";
 const RAG_THRESHOLD = Number(process.env.RAG_THRESHOLD || "0.4");
 const WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || null;
 
-// Ingestão automática opcional: defina INGEST_INTERVAL_MIN (ex.: 360 = 6h) para ligar.
 const INGEST_INTERVAL_MIN = Number(process.env.INGEST_INTERVAL_MIN || "0");
 const INGEST_MAX_PER_DOMAIN = Number(process.env.INGEST_MAX_PER_DOMAIN || "120");
 
@@ -48,7 +45,7 @@ try {
     BASE_CORPUS = JSON.parse(fs.readFileSync(corpusPath, "utf8"));
   }
 } catch {}
-let GENERATED = tryLoadGenerated(); // corpus gerado em /tmp
+let GENERATED = tryLoadGenerated(); // /tmp/corpus.generated.json
 let CORPUS_ITEMS = (BASE_CORPUS?.length || 0) + (GENERATED?.length || 0);
 console.log("[INFO] Corpus (base + gerado):", CORPUS_ITEMS, "items.");
 
@@ -180,7 +177,7 @@ app.get("/admin/health", (req, res) => {
   });
 });
 
-// ---------- Ingestão (aceita GET e POST) ----------
+// ---------- Ingestão (GET e POST) ----------
 async function runIngestHandler(req, res) {
   const token = req.headers["x-admin-token"] || req.query.token;
   if (token !== ADMIN_TOKEN)
@@ -192,7 +189,15 @@ async function runIngestHandler(req, res) {
 
   try {
     const r = await ingestAll({ modes, maxPerDomain: max });
-    GENERATED = tryLoadGenerated();
+
+    // *** PROTEÇÃO: só atualiza o corpus em memória se houver novos itens ***
+    if (r && r.added > 0) {
+      const fresh = tryLoadGenerated();
+      if (Array.isArray(fresh) && fresh.length) {
+        GENERATED = fresh;
+      }
+    }
+
     CORPUS_ITEMS = (BASE_CORPUS?.length || 0) + (GENERATED?.length || 0);
     return res.json({ ok: true, result: r, corpus_items: CORPUS_ITEMS });
   } catch (e) {
@@ -236,7 +241,7 @@ async function handleIncoming(req, res) {
   res.sendStatus(200);
 
   try {
-    // 0) Atualidade (feeds confiáveis) — responde já se encontrar algo “ao vivo”
+    // 0) Atualidade
     try {
       const live = await maybeAnswerRealtime(msg, lang);
       if (live && live.ok) {
@@ -253,7 +258,7 @@ async function handleIncoming(req, res) {
       }
     } catch {}
 
-    // 1) Busca no RAG (corpus)
+    // 1) RAG (corpus)
     const rag = await hybridSearch(msg, { threshold: RAG_THRESHOLD });
 
     if (rag?.pass) {
@@ -289,7 +294,7 @@ async function handleIncoming(req, res) {
       return;
     }
 
-    // 2) Fallback (sempre responde)
+    // 2) Fallback
     const prev = await getSubject(from);
     const prefix =
       lang === "pt"
@@ -337,8 +342,11 @@ if (INGEST_INTERVAL_MIN > 0) {
   setInterval(async () => {
     try {
       console.log("[INFO] Auto-ingest tick...");
-      await ingestAll({ modes: ["rss"], maxPerDomain: INGEST_MAX_PER_DOMAIN });
-      GENERATED = tryLoadGenerated();
+      const r = await ingestAll({ modes: ["rss"], maxPerDomain: INGEST_MAX_PER_DOMAIN });
+      if (r && r.added > 0) {
+        const fresh = tryLoadGenerated();
+        if (Array.isArray(fresh) && fresh.length) GENERATED = fresh;
+      }
       CORPUS_ITEMS = (BASE_CORPUS?.length || 0) + (GENERATED?.length || 0);
       console.log("[INFO] Auto-ingest done. corpus_items:", CORPUS_ITEMS);
     } catch (e) {
