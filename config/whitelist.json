@@ -3,7 +3,10 @@
     "mfa.gov.il": ["https://mfa.gov.il/RSS/Pages/rss.aspx"],
     "idf.il": ["https://www.idf.il/en/rss/"],
     "timesofisrael.com": ["https://www.timesofisrael.com/feed/"],
-    "jpost.com": ["https://www.jpost.com/Rss/RssFeedsBreakingNews.aspx", "https://www.jpost.com/Rss/RssFeedsFrontPage.aspx"],
+    "jpost.com": [
+      "https://www.jpost.com/Rss/RssFeedsBreakingNews.aspx",
+      "https://www.jpost.com/Rss/RssFeedsFrontPage.aspx"
+    ],
     "israelhayom.com": ["https://www.israelhayom.com/feed/"],
     "israelnationalnews.com": ["https://www.israelnationalnews.com/News/Rss"],
     "jns.org": ["https://www.jns.org/feed/"],
@@ -27,7 +30,11 @@
     "inss.org.il": ["/sitemap_index.xml"],
     "memri.org": ["/sitemap.xml"]
   },
-  "allow_paths": ["/news", "/opinion", "/analysis", "/articles", "/en", "/content"],
+  "allow_paths": [
+    "/news", "/opinion", "/analysis", "/articles",
+    "/en", "/content", "/world", "/middle-east", "/israel",
+    "/features", "/document", "/press", "/updates"
+  ],
   "deny_patterns": ["\\?.*utm_", "/tag/", "/category/"],
   "max_items_per_domain": 120
 }
