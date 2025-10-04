@@ -1,6 +1,7 @@
-// server.js — True Live v2.8.1 (final estável)
-// Inclui: RAG + Fallback + Memória persistente + Twilio + Health + Ingestão RSS/Sitemap
-// ✅ Agora aceita ingestão via navegador (GET e POST)
+// server.js — True Live v2.9.0 (final)
+// Recursos: RAG v3 + Fallback + Memória (Postgres) + Twilio + Health + Ingestão + Atualidade (realtime)
+// Rotas admin: /admin/health, /admin/ingest/run (GET/POST), /admin/ingest/status
+// Webhooks: /twilio/whatsapp (oficial) e /whatsapp (alias)
 
 import express from "express";
 import bodyParser from "body-parser";
@@ -13,6 +14,7 @@ import { fileURLToPath } from "url";
 
 import { search as hybridSearch } from "./services/hybridRag.js";
 import { ingestAll, tryLoadGenerated } from "./services/ingest.js";
+import { maybeAnswerRealtime } from "./services/realtime.js";
 
 const { Twilio } = pkg;
 const { Client: PgClient } = pg;
@@ -25,9 +27,13 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "truelive2025";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const ANSWER_OUTSIDE = String(process.env.ANSWER_OUTSIDE_CORPUS || "1") === "1";
-const APP_VERSION = process.env.APP_VERSION || "v2.8.1";
+const APP_VERSION = process.env.APP_VERSION || "v2.9.0";
 const RAG_THRESHOLD = Number(process.env.RAG_THRESHOLD || "0.4");
 const WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || null;
+
+// Ingestão automática opcional (desligada por padrão). Ligue definindo INGEST_INTERVAL_MIN, ex.: 360 (6h)
+const INGEST_INTERVAL_MIN = Number(process.env.INGEST_INTERVAL_MIN || "0");
+const INGEST_MAX_PER_DOMAIN = Number(process.env.INGEST_MAX_PER_DOMAIN || "120");
 
 const twilioClient =
   process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
@@ -47,7 +53,7 @@ let CORPUS_ITEMS = (BASE_CORPUS?.length || 0) + (GENERATED?.length || 0);
 
 console.log("[INFO] Corpus (base + gerado):", CORPUS_ITEMS, "items.");
 
-// ---------- Memória (RAM + Postgres opcional) ----------
+// ---------- Memória (RAM + Postgres) ----------
 let pgClient = null;
 async function pgInit() {
   if (!process.env.DATABASE_URL) return;
@@ -183,7 +189,7 @@ async function runIngestHandler(req, res) {
 
   const modeStr = req.query.mode || "rss,sitemap";
   const modes = modeStr.split(",").map((s) => s.trim());
-  const max = Number(req.query.max || 120);
+  const max = Number(req.query.max || INGEST_MAX_PER_DOMAIN || 120);
 
   try {
     const r = await ingestAll({ modes, maxPerDomain: max });
@@ -194,7 +200,6 @@ async function runIngestHandler(req, res) {
     return res.status(500).json({ ok: false, error: e.message });
   }
 }
-
 app.post("/admin/ingest/run", runIngestHandler);
 app.get("/admin/ingest/run", runIngestHandler);
 
@@ -210,7 +215,7 @@ app.get("/admin/ingest/status", (req, res) => {
   });
 });
 
-// ---------- Webhook (Twilio e alias simplificado) ----------
+// ---------- Webhooks WhatsApp ----------
 app.post("/twilio/whatsapp", handleIncoming);
 app.post("/whatsapp", handleIncoming);
 
@@ -232,7 +237,24 @@ async function handleIncoming(req, res) {
   res.sendStatus(200);
 
   try {
-    // 1) Busca no RAG
+    // 0) Atualidade (feeds confiáveis) — responde já se encontrar algo “ao vivo”
+    try {
+      const live = await maybeAnswerRealtime(msg, lang);
+      if (live && live.ok) {
+        const tail =
+          String(process.env.ANSWER_OUTSIDE_CORPUS || "1") === "1"
+            ? lang === "pt"
+              ? "\n\n(Atualidade via fontes externas)"
+              : lang === "es"
+              ? "\n\n(Actualidad vía fuentes externas)"
+              : "\n\n(Live via external sources)"
+            : "";
+        if (from) await waSend(from, live.text + tail);
+        return;
+      }
+    } catch {}
+
+    // 1) Busca no RAG (corpus)
     const rag = await hybridSearch(msg, { threshold: RAG_THRESHOLD });
 
     if (rag?.pass) {
@@ -268,7 +290,7 @@ async function handleIncoming(req, res) {
       return;
     }
 
-    // 2) Fallback
+    // 2) Fallback (sempre responde)
     const prev = await getSubject(from);
     const prefix =
       lang === "pt"
@@ -308,6 +330,22 @@ async function handleIncoming(req, res) {
           : "Technical error. Please try again."
       );
   }
+}
+
+// ---------- Ingestão automática opcional ----------
+if (INGEST_INTERVAL_MIN > 0) {
+  const ms = INGEST_INTERVAL_MIN * 60 * 1000;
+  setInterval(async () => {
+    try {
+      console.log("[INFO] Auto-ingest tick...");
+      await ingestAll({ modes: ["rss"], maxPerDomain: INGEST_MAX_PER_DOMAIN });
+      GENERATED = tryLoadGenerated();
+      CORPUS_ITEMS = (BASE_CORPUS?.length || 0) + (GENERATED?.length || 0);
+      console.log("[INFO] Auto-ingest done. corpus_items:", CORPUS_ITEMS);
+    } catch (e) {
+      console.warn("[WARN] Auto-ingest failed:", e.message);
+    }
+  }, ms);
 }
 
 // ---------- Start ----------
