@@ -1,34 +1,28 @@
-// services/htmlExtract.js — extrator simples (Readability-like)
-import { JSDOM } from "jsdom";
+// services/htmlExtract.js
+// Extrai título e “texto principal” por heurística simples (sem libs extras)
 
-export function extractArticle(html, baseUrl = "") {
-  if (!html) return { title: "", text: "" };
-  const dom = new JSDOM(html);
-  const doc = dom.window.document;
+export function extractMainText(html, url = "", fallbackTitle = "") {
+  let title = "";
+  try {
+    const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    title = (m && m[1] ? m[1] : "").trim();
+  } catch {}
+  if (!title) title = fallbackTitle || url;
 
-  const title =
-    doc.querySelector("meta[property='og:title']")?.content ||
-    doc.querySelector("title")?.textContent ||
-    "";
+  // Remove scripts/styles/noscript
+  const clean = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ");
 
-  doc.querySelectorAll("nav, header, footer, aside, script, style, noscript, iframe, form, svg, .advert, .ads, .promo").forEach((el) => el.remove());
+  // Heurística: pega blocos de <p>…</p>
+  const paras = Array.from(clean.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)).map(m =>
+    m[1]
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+  ).filter(Boolean);
 
-  const candidates = [];
-  doc.querySelectorAll("article, main, .content, .post, .entry, .story, .article, .post-content").forEach((el) => candidates.push(el));
-  if (candidates.length === 0) candidates.push(doc.body);
-
-  let best = candidates[0];
-  let bestScore = 0;
-  candidates.forEach((el) => {
-    const text = el.textContent || "";
-    const score = text.split(/\s+/).length - (el.querySelectorAll("a").length * 5);
-    if (score > bestScore) { bestScore = score; best = el; }
-  });
-
-  best.querySelectorAll("script,style,button,input,textarea,select,svg,figcaption").forEach((el) => el.remove());
-  const text = (best.textContent || "")
-    .replace(/\s+/g, " ")
-    .replace(/^\s+|\s+$/g, "");
-
-  return { title: (title || "").trim(), text: text.trim() };
+  const text = paras.join(" ").trim();
+  return { title, text };
 }
