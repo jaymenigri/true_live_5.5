@@ -1,11 +1,4 @@
 // services/hybridRag.js — v3.0 (estável)
-// - Carrega corpus de /corpus/corpus.json e aliases de /config/aliases.json (se existir)
-// - Busca híbrida: TF-IDF + boosting de título + heurística semântica
-// - Reranking final por “tema” para evitar trechos fora do assunto
-// - Snippets 1–2 frases coerentes
-// - Limiar adaptativo: passa se score >= threshold OU forte match em título
-// - Exporta named (search) e default (compat)
-
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
