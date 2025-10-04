@@ -1,93 +1,33 @@
 {
-  "domains": [
-    {
-      "domain": "idf.il",
-      "trust": "A",
-      "active": true,
-      "allow_paths": [
-        "/",
-        "/en/"
-      ]
-    },
-    {
-      "domain": "mfa.gov.il",
-      "trust": "A",
-      "active": true,
-      "allow_paths": [
-        "/"
-      ]
-    },
-    {
-      "domain": "gov.il",
-      "trust": "A",
-      "active": true,
-      "allow_paths": [
-        "/"
-      ]
-    },
-    {
-      "domain": "jewishvirtuallibrary.org",
-      "trust": "A",
-      "active": true,
-      "allow_paths": [
-        "/"
-      ]
-    },
-    {
-      "domain": "mdais.org",
-      "trust": "A",
-      "active": true,
-      "allow_paths": [
-        "/"
-      ]
-    },
-    {
-      "domain": "police.gov.il",
-      "trust": "A",
-      "active": true,
-      "allow_paths": [
-        "/"
-      ]
-    },
-    {
-      "domain": "inss.org.il",
-      "trust": "B",
-      "active": true,
-      "allow_paths": [
-        "/"
-      ]
-    },
-    {
-      "domain": "jcpa.org",
-      "trust": "B",
-      "active": true,
-      "allow_paths": [
-        "/"
-      ]
-    },
-    {
-      "domain": "jns.org",
-      "trust": "B",
-      "active": true,
-      "allow_paths": [
-        "/"
-      ]
-    },
-    {
-      "domain": "timesofisrael.com",
-      "trust": "B",
-      "active": true,
-      "allow_paths": [
-        "/"
-      ]
-    },
-    {
-      "domain": "jpost.com",
-      "trust": "B",
-      "active": true,
-      "allow_paths": [
-        "/"
-      ]
-    }
-  ]
+  "rss": {
+    "mfa.gov.il": ["https://mfa.gov.il/RSS/Pages/rss.aspx"],
+    "idf.il": ["https://www.idf.il/en/rss/"],
+    "timesofisrael.com": ["https://www.timesofisrael.com/feed/"],
+    "jpost.com": ["https://www.jpost.com/Rss/RssFeedsBreakingNews.aspx", "https://www.jpost.com/Rss/RssFeedsFrontPage.aspx"],
+    "israelhayom.com": ["https://www.israelhayom.com/feed/"],
+    "israelnationalnews.com": ["https://www.israelnationalnews.com/News/Rss"],
+    "jns.org": ["https://www.jns.org/feed/"],
+    "honestreporting.com": ["https://honestreporting.com/feed/"],
+    "jcpa.org": ["https://jcpa.org/feed/"],
+    "jewishvirtuallibrary.org": ["https://www.jewishvirtuallibrary.org/rss.xml"],
+    "inss.org.il": ["https://www.inss.org.il/en/feed/"],
+    "memri.org": ["https://www.memri.org/rss.xml"]
+  },
+  "sitemap": {
+    "mfa.gov.il": ["/Pages/sitemap.xml"],
+    "idf.il": ["/sitemap.xml"],
+    "timesofisrael.com": ["/sitemap.xml"],
+    "jpost.com": ["/sitemap.xml"],
+    "israelhayom.com": ["/sitemap_index.xml", "/sitemap.xml"],
+    "israelnationalnews.com": ["/sitemap.xml"],
+    "jns.org": ["/sitemap_index.xml"],
+    "honestreporting.com": ["/sitemap_index.xml"],
+    "jcpa.org": ["/sitemap_index.xml"],
+    "jewishvirtuallibrary.org": ["/sitemap.xml"],
+    "inss.org.il": ["/sitemap_index.xml"],
+    "memri.org": ["/sitemap.xml"]
+  },
+  "allow_paths": ["/news", "/opinion", "/analysis", "/articles", "/en", "/content"],
+  "deny_patterns": ["\\?.*utm_", "/tag/", "/category/"],
+  "max_items_per_domain": 120
 }
