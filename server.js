@@ -1,8 +1,13 @@
-// server.js — True Live v2.9.3 (final)
-// Fixes:
-// 1) Coreferência no RAG: reforça a query com o assunto atual quando há pronomes (“sua/esposa dele/etc.”).
-// 2) Assunto explícito fora do corpus: grava “Latvia/Letônia”, etc., mesmo sem RAG, e usa na próxima pergunta.
-// 3) Não herda assunto antigo quando uma nova entidade/country aparece na pergunta atual.
+// server.js — True Live v2.9.4 (final)
+// - ACK imediato no WhatsApp
+// - Coreferência: reforça query do RAG com assunto atual quando há pronomes (“sua/dele/ela/lá”)
+// - Assunto explícito fora do corpus: grava “Letônia/Latvia”, “Gaza”, etc., mesmo sem RAG
+// - Gating estrito: passa ao acervo SOMENTE se score >= threshold
+// - Reranking leve (no RAG)
+// - Limiar padrão 0.45 (ajustável via RAG_THRESHOLD)
+// - Ingest protegido: não “zera” gerado quando added=0
+// - Health, ingest (GET/POST), status
+// - Fallback SEMPRE responde (nunca recusa em branco)
 
 import express from "express";
 import bodyParser from "body-parser";
@@ -28,19 +33,20 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "truelive2025";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const ANSWER_OUTSIDE = String(process.env.ANSWER_OUTSIDE_CORPUS || "1") === "1";
-const APP_VERSION = process.env.APP_VERSION || "v2.9.3";
-const RAG_THRESHOLD = Number(process.env.RAG_THRESHOLD || "0.4");
+const APP_VERSION = process.env.APP_VERSION || "v2.9.4";
+const RAG_THRESHOLD = Number(process.env.RAG_THRESHOLD || "0.45");
 const WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || null;
 
 const INGEST_INTERVAL_MIN = Number(process.env.INGEST_INTERVAL_MIN || "0");
 const INGEST_MAX_PER_DOMAIN = Number(process.env.INGEST_MAX_PER_DOMAIN || "120");
 
+// Twilio client (opcional)
 const twilioClient =
   process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
     ? new Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
     : null;
 
-// ---------- Corpus base + gerado (/corpus + /tmp) ----------
+// ---------- Corpus base + gerado ----------
 let BASE_CORPUS = [];
 try {
   const corpusPath = path.join(__dirname, "corpus", "corpus.json");
@@ -52,7 +58,7 @@ let GENERATED = tryLoadGenerated(); // /tmp/corpus.generated.json
 let CORPUS_ITEMS = (BASE_CORPUS?.length || 0) + (GENERATED?.length || 0);
 console.log("[INFO] Corpus (base + gerado):", CORPUS_ITEMS, "items.");
 
-// ---------- Memória (RAM + Postgres) ----------
+// ---------- Postgres (memória persistente do assunto) ----------
 let pgClient = null;
 async function pgInit() {
   if (!process.env.DATABASE_URL) return;
@@ -78,6 +84,7 @@ async function pgInit() {
 await pgInit();
 
 const memory = new Map(); // sender -> { subject, updatedAt }
+
 async function getSubject(sender) {
   const m = memory.get(sender);
   if (m && Date.now() - m.updatedAt < 24 * 60 * 60 * 1000) return m.subject;
@@ -138,54 +145,32 @@ async function openaiAnswer(prompt, lang) {
   return data?.choices?.[0]?.message?.content?.trim() || "OK.";
 }
 
-// ---------- Auxiliares ----------
+// ---------- Utilidades ----------
 function detectLang(s) {
   const n = (s || "").toLowerCase();
-  if (
-    /[áãâéêíóôõúç]/.test(n) ||
-    /\b(qual|quem|onde|como|por que|quando)\b/.test(n)
-  )
-    return "pt";
+  if (/[áãâéêíóôõúç]/.test(n) || /\b(qual|quem|onde|como|por que|quando)\b/.test(n)) return "pt";
   if (/\b(dónde|quién|cómo|por qué|cuándo|cuál)\b/.test(n)) return "es";
   return "en";
 }
-
-// Heurística de coreferência: pergunta com pronomes/anáforas?
 function isCorefQuestion(q) {
   const n = (q || "").toLowerCase();
   return /\b(ele|ela|dele|dela|seu|sua|seus|suas|lá|isso|aquilo)\b/.test(n);
 }
-
-// Detecta assunto explícito (país/entidade) mesmo fora do corpus
 function explicitSubject(q) {
   const n = (q || "").toLowerCase();
-
-  // Países e entidades comuns (pode expandir depois)
   const MAP = [
-    ["letônia", "Letônia"],
-    ["latvia", "Letônia"],
-    ["lituânia", "Lituânia"],
-    ["lithuania", "Lituânia"],
+    ["letônia", "Letônia"], ["latvia", "Letônia"],
+    ["lituânia", "Lituânia"], ["lithuania", "Lituânia"],
     ["israel", "Israel"],
-    ["faixa de gaza", "Faixa de Gaza"],
-    ["gaza", "Faixa de Gaza"],
-    ["cisjordânia", "Cisjordânia"],
-    ["west bank", "Cisjordânia"],
-    ["jerusalém", "Jerusalém"],
-    ["jerusalem", "Jerusalém"],
-    ["ben-gurion", "David Ben-Gurion"],
-    ["ben gurion", "David Ben-Gurion"],
-    ["golda meir", "Golda Meir"],
-    ["itzhak rabin", "Itzhak Rabin"],
-    ["yitzhak rabin", "Itzhak Rabin"]
+    ["faixa de gaza", "Faixa de Gaza"], ["gaza", "Faixa de Gaza"],
+    ["cisjordânia", "Cisjordânia"], ["west bank", "Cisjordânia"],
+    ["jerusalém", "Jerusalém"], ["jerusalem", "Jerusalém"],
+    ["ben-gurion", "David Ben-Gurion"], ["ben gurion", "David Ben-Gurion"],
+    ["golda meir", "Golda Meir"], ["itzhak rabin", "Itzhak Rabin"], ["yitzhak rabin", "Itzhak Rabin"]
   ];
-
-  for (const [k, v] of MAP) {
-    if (n.includes(k)) return v;
-  }
+  for (const [k, v] of MAP) if (n.includes(k)) return v;
   return null;
 }
-
 async function waSend(to, text) {
   if (!twilioClient || !WHATSAPP_FROM) return;
   try {
@@ -200,12 +185,11 @@ const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// Health check
+// Health
 app.get("/health", (_req, res) => res.send("ok"));
 app.get("/admin/health", (req, res) => {
   const token = req.query.token;
-  if (token !== ADMIN_TOKEN)
-    return res.status(401).json({ status: "unauthorized" });
+  if (token !== ADMIN_TOKEN) return res.status(401).json({ status: "unauthorized" });
   res.json({
     status: "ok",
     version: APP_VERSION,
@@ -216,11 +200,10 @@ app.get("/admin/health", (req, res) => {
   });
 });
 
-// ---------- Ingestão (GET e POST) ----------
+// Ingest (GET e POST)
 async function runIngestHandler(req, res) {
   const token = req.headers["x-admin-token"] || req.query.token;
-  if (token !== ADMIN_TOKEN)
-    return res.status(401).json({ ok: false, error: "unauthorized" });
+  if (token !== ADMIN_TOKEN) return res.status(401).json({ ok: false, error: "unauthorized" });
 
   const modeStr = req.query.mode || "rss,sitemap";
   const modes = modeStr.split(",").map((s) => s.trim());
@@ -229,12 +212,10 @@ async function runIngestHandler(req, res) {
   try {
     const r = await ingestAll({ modes, maxPerDomain: max });
 
-    // Proteção: só atualiza o corpus gerado se houver novos itens
+    // Proteção: só atualiza corpus gerado em memória se added>0
     if (r && r.added > 0) {
       const fresh = tryLoadGenerated();
-      if (Array.isArray(fresh) && fresh.length) {
-        GENERATED = fresh;
-      }
+      if (Array.isArray(fresh) && fresh.length) GENERATED = fresh;
     }
 
     CORPUS_ITEMS = (BASE_CORPUS?.length || 0) + (GENERATED?.length || 0);
@@ -248,8 +229,7 @@ app.get("/admin/ingest/run", runIngestHandler);
 
 app.get("/admin/ingest/status", (req, res) => {
   const token = req.query.token;
-  if (token !== ADMIN_TOKEN)
-    return res.status(401).json({ ok: false, error: "unauthorized" });
+  if (token !== ADMIN_TOKEN) return res.status(401).json({ ok: false, error: "unauthorized" });
   res.json({
     ok: true,
     corpus_items: CORPUS_ITEMS,
@@ -258,7 +238,7 @@ app.get("/admin/ingest/status", (req, res) => {
   });
 });
 
-// ---------- Webhooks WhatsApp ----------
+// WhatsApp webhooks
 app.post("/twilio/whatsapp", handleIncoming);
 app.post("/whatsapp", handleIncoming);
 
@@ -268,133 +248,86 @@ async function handleIncoming(req, res) {
   const from = body.From || body.from || "";
 
   const lang = detectLang(msg);
-  if (from && twilioClient)
-    waSend(
-      from,
-      lang === "pt"
-        ? "✅ Recebido, pensando..."
-        : lang === "es"
-        ? "✅ Recibido, pensando..."
-        : "✅ Received, thinking..."
-    );
+  if (from && twilioClient) {
+    waSend(from, lang === "pt" ? "✅ Recebido, pensando..." :
+                 lang === "es" ? "✅ Recibido, pensando..." :
+                                  "✅ Received, thinking...");
+  }
   res.sendStatus(200);
 
   try {
-    // 0) Atualizar assunto explícito (mesmo fora do corpus)
+    // 0) Assunto explícito (mesmo fora do corpus)
     const explicit = explicitSubject(msg);
-    if (explicit) {
-      await setSubject(from, explicit);
-    }
+    if (explicit) await setSubject(from, explicit);
 
-    // 1) Atualidade (feeds confiáveis)
+    // 1) Atualidade (se aplicável)
     try {
       const live = await maybeAnswerRealtime(msg, lang);
       if (live && live.ok) {
-        const tail =
-          String(process.env.ANSWER_OUTSIDE_CORPUS || "1") === "1"
-            ? lang === "pt"
-              ? "\n\n(Atualidade via fontes externas)"
-              : lang === "es"
-              ? "\n\n(Actualidad vía fuentes externas)"
-              : "\n\n(Live via external sources)"
-            : "";
+        const tail = ANSWER_OUTSIDE
+          ? (lang === "pt" ? "\n\n(Atualidade via fontes externas)" :
+             lang === "es" ? "\n\n(Actualidad vía fuentes externas)" :
+                             "\n\n(Live via external sources)")
+          : "";
         if (from) await waSend(from, live.text + tail);
         return;
       }
     } catch {}
 
-    // 2) RAG (corpus) — com coreferência
+    // 2) RAG (com coreferência e gating estrito)
     const prev = await getSubject(from);
     const useCoref = isCorefQuestion(msg);
-    const ragQuery =
-      // se houver entidade explícita agora, não poluo a query com assunto antigo
-      explicit ? msg : (useCoref && prev ? `${msg} (referente a: ${prev})` : msg);
+    const ragQuery = explicit ? msg : (useCoref && prev ? `${msg} (referente a: ${prev})` : msg);
 
     const rag = await hybridSearch(ragQuery, { threshold: RAG_THRESHOLD });
 
     if (rag?.pass) {
-      // Se o RAG identificou um subject, atualiza; senão, mantém o explicit/prev
-      if (rag.subject) {
-        await setSubject(from, rag.subject);
-      } else if (explicit) {
-        await setSubject(from, explicit);
-      }
+      if (rag.subject) await setSubject(from, rag.subject);
+      else if (explicit) await setSubject(from, explicit);
 
-      const fontes = (rag.sources || [])
-        .map((s) => s.title || s.id)
-        .filter(Boolean)
-        .slice(0, 6)
-        .join(" | ");
+      const fontes = (rag.sources || []).map(s => s.title || s.id).filter(Boolean).slice(0, 6).join(" | ");
       let answer = (rag.snippets || []).join(" ");
-      const tag =
-        lang === "pt"
-          ? "Baseado no acervo."
-          : lang === "es"
-          ? "Basado en el acervo."
-          : "Based on the corpus.";
+      const tag = (lang === "pt" ? "Baseado no acervo." :
+                   lang === "es" ? "Basado en el acervo." :
+                                    "Based on the corpus.");
       answer = answer ? `${answer}\n\n${tag}` : tag;
       if (fontes) {
-        const fl =
-          lang === "pt"
-            ? `Fontes: ${fontes}`
-            : lang === "es"
-            ? `Fuentes: ${fontes}`
-            : `Sources: ${fontes}`;
+        const fl = (lang === "pt" ? `Fontes: ${fontes}` :
+                    lang === "es" ? `Fuentes: ${fontes}` :
+                                     `Sources: ${fontes}`);
         answer += `\n${fl}`;
       }
       if (from) await waSend(from, answer);
-      console.log("[INFO] RAG result", {
-        scope: "in",
-        score: rag.score,
-        resolvedQuery: ragQuery,
-      });
+      console.log("[INFO] RAG result", { scope: "in", score: rag.score, resolvedQuery: ragQuery });
       return;
     }
 
     // 3) Fallback (sempre responde)
     const subjectForFb = explicit || (useCoref ? await getSubject(from) : null);
-    const prefix =
-      lang === "pt"
-        ? subjectForFb
-          ? `Assunto atual: ${subjectForFb}. `
-          : ""
-        : lang === "es"
-        ? subjectForFb
-          ? `Tema actual: ${subjectForFb}. `
-          : ""
-        : subjectForFb
-        ? `Current subject: ${subjectForFb}. `
-        : "";
-
+    const prefix = (lang === "pt" ? (subjectForFb ? `Assunto atual: ${subjectForFb}. ` : "") :
+                    lang === "es" ? (subjectForFb ? `Tema actual: ${subjectForFb}. ` : "") :
+                                     (subjectForFb ? `Current subject: ${subjectForFb}. ` : ""));
     const fb = await openaiAnswer(`${prefix}${msg}`, lang);
     const tail = ANSWER_OUTSIDE
-      ? lang === "pt"
-        ? "\n\nResposta geral (fora do acervo)."
-        : lang === "es"
-        ? "\n\nRespuesta general (fuera del acervo)."
-        : "\n\nGeneral answer (outside the corpus)."
+      ? (lang === "pt" ? "\n\nResposta geral (fora do acervo)." :
+         lang === "es" ? "\n\nRespuesta general (fuera del acervo)." :
+                         "\n\nGeneral answer (outside the corpus).")
       : "";
     if (from) await waSend(from, fb + tail);
-    console.log("[INFO] RAG result", {
-      scope: "out",
-      score: rag?.score ?? 0,
-      resolvedQuery: ragQuery,
-    });
+    console.log("[INFO] RAG result", { scope: "out", score: rag?.score ?? 0, resolvedQuery: ragQuery });
   } catch (e) {
     console.error("[ERROR] handler:", e);
-    if (from)
-      await waSend(
-        from,
-        lang === "pt"
-          ? "Erro técnico. Tente novamente."
-          : lang === "es"
-          ? "Error técnico. Intenta de nuevo."
-          : "Technical error. Please try again."
+    if (from) {
+      await waSend(from,
+        lang === "pt" ? "Erro técnico. Tente novamente." :
+        lang === "es" ? "Error técnico. Intenta de nuevo." :
+                        "Technical error. Please try again."
       );
+    }
   }
 }
 
-// ---------- Ingestão automática opcional ----------
+// Ingest automático opcional
 if (INGEST_INTERVAL_MIN > 0) {
   const ms = INGEST_INTERVAL_MIN * 60 * 1000;
   setInterval(async () => {
@@ -413,7 +346,7 @@ if (INGEST_INTERVAL_MIN > 0) {
   }, ms);
 }
 
-// ---------- Start ----------
+// Start
 app.listen(PORT, () => {
   console.log("[INFO] Server up", { port: String(PORT) });
 });
