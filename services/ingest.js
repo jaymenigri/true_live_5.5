@@ -1,4 +1,4 @@
-// services/ingest.js — ingestor RSS/Sitemap
+// services/ingest.js — v1.1 (ingestor RSS/Sitemap)
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -46,11 +46,19 @@ function allowedPath(u, allowPaths=[], denyPatterns=[]) {
     return true;
   } catch { return false; }
 }
+
 async function fetchText(url) {
-  const r = await fetch(url, { redirect: "follow", timeout: 15000 });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return await r.text();
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 15000);
+  try {
+    const r = await fetch(url, { redirect: "follow", signal: ac.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.text();
+  } finally {
+    clearTimeout(t);
+  }
 }
+
 function chunkIntoSentences(text, maxLen = 420) {
   const parts = (text || "").split(/[.!?]\s+/).map(s => s.trim()).filter(Boolean);
   const out = [];
@@ -154,7 +162,7 @@ export async function ingestAll({ modes = ["rss","sitemap"], maxPerDomain = 120 
             seen.add(link);
             count++;
           }
-        } catch { /* ignora */ }
+        } catch { /* ignora e segue */ }
       }
     }
   }
