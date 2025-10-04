@@ -1,12 +1,9 @@
-// server.js — True Live v2.9.4 (final)
-// - ACK imediato no WhatsApp
-// - Coreferência: reforça query do RAG com assunto atual quando há pronomes (“sua/dele/ela/lá”)
-// - Assunto explícito fora do corpus: grava “Letônia/Latvia”, “Gaza”, etc., mesmo sem RAG
-// - Gating estrito: passa ao acervo SOMENTE se score >= threshold
-// - Reranking leve (no RAG)
-// - Limiar padrão 0.45 (ajustável via RAG_THRESHOLD)
-// - Ingest protegido: não “zera” gerado quando added=0
-// - Health, ingest (GET/POST), status
+// server.js — True Live v2.9.5 (final)
+// - ACK via Twilio (“pensando…”) e resposta final via Twilio quando disponível
+// - Quando Twilio NÃO está configurado OU não há `from`, responde SINCRONAMENTE via JSON
+// - Gating estrito no RAG (score >= threshold)
+// - Coreferência e “assunto explícito” (Letônia/Latvia, Gaza, etc.)
+// - Ingest protegido e rotas /admin/health, /admin/ingest/run, /admin/ingest/status
 // - Fallback SEMPRE responde (nunca recusa em branco)
 
 import express from "express";
@@ -33,7 +30,7 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "truelive2025";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const ANSWER_OUTSIDE = String(process.env.ANSWER_OUTSIDE_CORPUS || "1") === "1";
-const APP_VERSION = process.env.APP_VERSION || "v2.9.4";
+const APP_VERSION = process.env.APP_VERSION || "v2.9.5";
 const RAG_THRESHOLD = Number(process.env.RAG_THRESHOLD || "0.45");
 const WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || null;
 
@@ -243,19 +240,31 @@ app.post("/twilio/whatsapp", handleIncoming);
 app.post("/whatsapp", handleIncoming);
 
 async function handleIncoming(req, res) {
+  // Para suportar modo "sem Twilio", devolvemos JSON quando não houver from ou Twilio
+  let responded = false;
+  function respondJSON(payload, status = 200) {
+    if (!responded) {
+      res.status(status).json(payload);
+      responded = true;
+    }
+  }
+
   const body = req.body || {};
   const msg = (body.Body || body.text || "").trim();
   const from = body.From || body.from || "";
-
   const lang = detectLang(msg);
-  if (from && twilioClient) {
-    waSend(from, lang === "pt" ? "✅ Recebido, pensando..." :
-                 lang === "es" ? "✅ Recibido, pensando..." :
-                                  "✅ Received, thinking...");
-  }
-  res.sendStatus(200);
 
   try {
+    // Se Twilio disponível e há 'from', enviamos "pensando..."
+    if (from && twilioClient) {
+      waSend(
+        from,
+        lang === "pt" ? "✅ Recebido, pensando..." :
+        lang === "es" ? "✅ Recibido, pensando..." :
+                        "✅ Received, thinking..."
+      );
+    }
+
     // 0) Assunto explícito (mesmo fora do corpus)
     const explicit = explicitSubject(msg);
     if (explicit) await setSubject(from, explicit);
@@ -269,10 +278,18 @@ async function handleIncoming(req, res) {
              lang === "es" ? "\n\n(Actualidad vía fuentes externas)" :
                              "\n\n(Live via external sources)")
           : "";
-        if (from) await waSend(from, live.text + tail);
+        const reply = live.text + tail;
+        if (from && twilioClient) {
+          await waSend(from, reply);
+        } else {
+          respondJSON({ ok: true, scope: "realtime", reply });
+        }
+        if (!responded) res.sendStatus(200);
         return;
       }
-    } catch {}
+    } catch {
+      // em caso de erro de realtime, segue fluxo normal
+    }
 
     // 2) RAG (com coreferência e gating estrito)
     const prev = await getSubject(from);
@@ -297,8 +314,21 @@ async function handleIncoming(req, res) {
                                      `Sources: ${fontes}`);
         answer += `\n${fl}`;
       }
-      if (from) await waSend(from, answer);
+
+      if (from && twilioClient) {
+        await waSend(from, answer);
+      } else {
+        respondJSON({
+          ok: true,
+          scope: "rag",
+          score: rag.score,
+          subject: rag.subject || null,
+          reply: answer,
+          sources: rag.sources || []
+        });
+      }
       console.log("[INFO] RAG result", { scope: "in", score: rag.score, resolvedQuery: ragQuery });
+      if (!responded) res.sendStatus(200);
       return;
     }
 
@@ -313,16 +343,34 @@ async function handleIncoming(req, res) {
          lang === "es" ? "\n\nRespuesta general (fuera del acervo)." :
                          "\n\nGeneral answer (outside the corpus).")
       : "";
-    if (from) await waSend(from, fb + tail);
+    const reply = fb + tail;
+
+    if (from && twilioClient) {
+      await waSend(from, reply);
+    } else {
+      respondJSON({
+        ok: true,
+        scope: "fallback",
+        subject: subjectForFb || null,
+        reply
+      });
+    }
     console.log("[INFO] RAG result", { scope: "out", score: rag?.score ?? 0, resolvedQuery: ragQuery });
+
+    // Encerra HTTP
+    if (!responded) res.sendStatus(200);
   } catch (e) {
     console.error("[ERROR] handler:", e);
-    if (from) {
-      await waSend(from,
-        lang === "pt" ? "Erro técnico. Tente novamente." :
-        lang === "es" ? "Error técnico. Intenta de nuevo." :
-                        "Technical error. Please try again."
-      );
+    const errMsg =
+      lang === "pt" ? "Erro técnico. Tente novamente." :
+      lang === "es" ? "Error técnico. Intenta de nuevo." :
+                      "Technical error. Please try again.";
+
+    if (from && twilioClient) {
+      await waSend(from, errMsg);
+      if (!responded) res.sendStatus(200);
+    } else {
+      respondJSON({ ok: false, error: errMsg }, 500);
     }
   }
 }
