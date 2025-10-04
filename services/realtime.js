@@ -1,4 +1,4 @@
-// services/realtime.js — v1.0
+// services/realtime.js — v1.1
 // “Atualidade”: usa RSS de fontes whitelisted para responder perguntas do tipo “agora/hoje/quantos reféns?”.
 // Se achar manchetes relevantes, responde imediatamente; senão, retorna null e o fluxo segue (RAG/fallback).
 
@@ -55,10 +55,17 @@ function looksLive(q) {
   return LIVE_PATTERNS.some((p) => n.includes(p));
 }
 
+// timeout real com AbortController
 async function fetchText(url) {
-  const r = await fetch(url, { timeout: 12000, redirect: "follow" });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return await r.text();
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 12000);
+  try {
+    const r = await fetch(url, { redirect: "follow", signal: ac.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.text();
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 function parseRss(xml) {
@@ -75,8 +82,7 @@ function itemToCard(it) {
   return { title: String(title), description: String(desc || ""), link: String(link || ""), date: String(date || "") };
 }
 
-function keepRelevant(card, q) {
-  const nQ = norm(q);
+function keepRelevant(card, _q) {
   const nT = norm(card.title);
   const nD = norm(card.description);
   const hits = ["refen","reféns","refem","hostage","gaza","israel","ataque","rocket","kibbutz","idf","hamas","hezbollah","fronteira","cativeiro","troca"].filter(w =>
@@ -113,7 +119,12 @@ export async function maybeAnswerRealtime(query, lang = "pt") {
   };
   cards.sort((a, b) => score(b) - score(a));
   const top = cards.slice(0, 2);
-  const bullets = top.map((c) => `• ${c.title} — ${new URL(c.link).hostname.replace(/^www\./,"")}`);
+
+  const bullets = top.map((c) => {
+    let host = "";
+    try { host = new URL(c.link).hostname.replace(/^www\./,""); } catch {}
+    return `• ${c.title}${host ? " — " + host : ""}`;
+  });
 
   const header =
     lang === "pt" ? "Atualização recente (fontes confiáveis):"
