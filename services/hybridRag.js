@@ -1,195 +1,229 @@
-// services/hybridRag.js — v3.1 (final)
-// - Lê corpus base (corpus/corpus.json) + gerado (/tmp/corpus.generated.json) se existir
-// - Normaliza campos: id, title/name/headline, text/content/snippet, source/url, date/published_at
-// - Query expansion leve por aliases.json (se existir)
-// - TF-IDF + cosseno + boost de título; reranking leve por tópico (overlap de n-grams)
-// - Sentence split sem lookbehind problemático (compatível Node 20)
-// - Gating ESTRITO: pass = (best.score >= threshold)
+// services/hybridRag.js — v2.11.0
+// - Carrega corpus base (/corpus/corpus.json) + gerado (/tmp/corpus.generated.json)
+// - Híbrido TF-IDF/cosseno
+// - Threshold estrito: pass = bestScore >= threshold
+// - Snippets SENSÍVEIS À PERGUNTA: seleciona sentenças mais relevantes por TF-IDF
+// - Boost relacional: se a pergunta é relacional e há prevSubject, favorece docs
+//   cujo título sugira o par (ex.: "Leah Rabin" quando subject contém "Rabin")
 
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-function safeReadJSON(p) {
+// -------------------- load corpus --------------------
+function tryLoad(file) {
   try {
-    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf8"));
-  } catch {}
-  return null;
+    if (!fs.existsSync(file)) return [];
+    const raw = fs.readFileSync(file, "utf8");
+    const json = JSON.parse(raw);
+    if (Array.isArray(json)) return json;
+    if (Array.isArray(json.items)) return json.items;
+    return [];
+  } catch {
+    return [];
+  }
 }
 
-function normalizeDoc(raw, idx) {
-  if (!raw) return null;
-  const title = raw.title || raw.name || raw.headline || "";
-  const text = raw.text || raw.content || raw.body || raw.snippet || "";
-  const source = raw.source || raw.url || "corpus";
-  const date = raw.date || raw.published_at || "";
-  const id = raw.id || `doc-${idx}`;
-  return { id, title: String(title), text: String(text), source: String(source), date: String(date) };
+const baseCorpus = tryLoad(path.join(__dirname, "..", "corpus", "corpus.json"));
+const genCorpus  = tryLoad("/tmp/corpus.generated.json");
+
+function normalizeItem(x, i) {
+  return {
+    id: x.id || `doc-${i}`,
+    title: x.title || x.name || x.headline || "(sem título)",
+    text: x.text || x.content || x.body || x.snippet || "",
+    date: x.date || x.published_at || "",
+    source: x.source || x.url || "corpus",
+  };
 }
 
-function loadAliases() {
-  const a1 = path.join(path.dirname(__dirname), "aliases.json");
-  const a2 = path.join(process.cwd(), "aliases.json");
-  return safeReadJSON(a1) || safeReadJSON(a2) || {};
-}
+const CORPUS = [...baseCorpus, ...genCorpus].map(normalizeItem);
+console.log(`[INFO] Corpus loaded: ${CORPUS.length} items.`);
 
-function tokenize(str) {
-  return (str || "")
+export function corpusSize() { return CORPUS.length; }
+
+// -------------------- tokenização / TF-IDF --------------------
+const STOP = new Set([
+  // pt
+  "a","o","os","as","um","uma","de","do","da","das","dos","e","em","no","na","nos","nas","para","por","que","quem","qual","quais","onde","como","quando","porque","sobre","com","seu","sua","dele","dela","ao","à","às","aos",
+  // en
+  "the","a","an","of","in","on","for","to","and","or","is","are","was","were","who","what","where","how","when","which","with","by","from",
+  // es
+  "el","la","los","las","un","una","de","del","y","en","para","por","que","quien","donde","como","cuando","cual","cuales","con",
+]);
+
+function normalize(s="") {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+function tokenize(s="") {
+  return normalize(s)
     .toLowerCase()
-    .normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9áéíóúâêôãõç\s\-]/gi, " ")
+    .replace(/[^a-z0-9áéíóúñçàãõü\- ]/gi, " ")
     .split(/\s+/)
-    .filter(Boolean);
+    .filter(w => w && !STOP.has(w));
 }
 
-function ngrams(tokens, n=2) {
-  const out = new Set();
-  for (let i=0;i+n-1<tokens.length;i++) out.add(tokens.slice(i,i+n).join(" "));
-  return out;
-}
+// documentos vetorizados
+const DOC_TOKENS = CORPUS.map(d => tokenize(`${d.title} ${d.text}`));
+const DF = new Map();
+DOC_TOKENS.forEach(tokens => {
+  const uniq = new Set(tokens);
+  uniq.forEach(t => DF.set(t, (DF.get(t) || 0) + 1));
+});
+const N = Math.max(1, CORPUS.length);
+const IDF = new Map();
+DF.forEach((df, t) => IDF.set(t, Math.log((N + 1) / (df + 0.5))));
 
-function firstSentences(text, max = 2) {
-  if (!text) return [];
-  const out = [];
-  let acc = "";
-  for (const ch of String(text)) {
-    acc += ch;
-    if (/[.!?]/.test(ch)) {
-      const s = acc.trim();
-      if (s) out.push(s);
-      acc = "";
-      if (out.length >= max) break;
-    }
-  }
-  if (out.length < max) {
-    const tail = (acc || "").trim();
-    if (tail) out.push(tail);
-  }
-  return out;
-}
-
-function buildTfIdf(docs) {
-  const df = new Map(); // term -> doc freq
-  const tokenized = [];
-  for (const d of docs) {
-    const tks = tokenize((d.title || "") + " " + (d.text || ""));
-    tokenized.push(tks);
-    const seen = new Set(tks);
-    seen.forEach(w => df.set(w, (df.get(w) || 0) + 1));
-  }
-  const N = docs.length || 1;
-  const idf = new Map();
-  df.forEach((v,k)=> idf.set(k, Math.log((N+1)/(v+1)) + 1));
-  return { tokenized, idf, N };
-}
-
-function vectorize(tokens, idf) {
+function buildVec(tokens) {
   const tf = new Map();
-  tokens.forEach(w => tf.set(w, (tf.get(w)||0)+1));
-  const vec = new Map();
-  tf.forEach((v,k) => vec.set(k, v * (idf.get(k)||1)));
-  let norm = 0;
-  vec.forEach(v => norm += v*v);
-  norm = Math.sqrt(norm)||1;
-  return { vec, norm };
+  tokens.forEach(t => tf.set(t, (tf.get(t) || 0) + 1));
+  const v = new Map();
+  tf.forEach((c, t) => v.set(t, c * (IDF.get(t) || 0)));
+  return v;
 }
 
-function cosine(a, b) {
-  let dot = 0;
-  a.forEach((va,ka)=>{
-    const vb = b.get(ka);
-    if (vb) dot += va*vb;
+const DOC_VEC = DOC_TOKENS.map(buildVec);
+
+function cosine(A, B) {
+  let dot = 0, a2 = 0, b2 = 0;
+  A.forEach((va, t) => { if (B.has(t)) dot += va * B.get(t); a2 += va * va; });
+  B.forEach(vb => { b2 += vb * vb; });
+  if (!a2 || !b2) return 0;
+  return dot / (Math.sqrt(a2) * Math.sqrt(b2));
+}
+
+// -------------------- helpers de assunto & relacional --------------------
+function isRelationalQuery(q="") {
+  const t = ` ${q.toLowerCase()} `;
+  return [
+    "esposa","marido","cônjuge","conjuge","filhos","filho","filha","mãe","mae","pai",
+    "sogro","sogra","dele","dela","onde nasceu",
+    "wife","husband","spouse","children","child","son","daughter","mother","father","parents",
+  ].some(k => t.includes(k));
+}
+
+function subjectFromTitle(title="") {
+  const beforeParen = title.split("(")[0];
+  return beforeParen.split("—")[0].split("-")[0].trim() || title;
+}
+
+function relationalTitleBoost(title, prevSubject) {
+  if (!prevSubject) return 0;
+  const t = normalize(title).toLowerCase();
+  const s = normalize(prevSubject).toLowerCase();
+  // heurística: se perguntar algo relacional, documentos com o sobrenome do subject ou
+  // com “Leah”, “Paula”, “Família”, “Family”, “Spouse”, etc. ganham ponto extra.
+  let boost = 0;
+  if (t.includes(s.split(" ").slice(-1)[0])) boost += 0.05;
+  if (/(leah|paula|fam[ií]lia|family|spouse|wife|husband)/i.test(title)) boost += 0.07;
+  return boost;
+}
+
+// -------------------- snippets sensíveis à pergunta --------------------
+function splitSentences(text="") {
+  // versão simples e robusta (evita lookbehind)
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (!flat) return [];
+  // mantém ponto final nos fragmentos subsequentes
+  const parts = flat.split(/[\.\!\?]\s+/);
+  return parts.map((p, i) => (i < parts.length - 1 ? p + "." : p)).filter(Boolean);
+}
+
+function sentenceScore(sent, qTokens, relWeight=1) {
+  if (!sent) return 0;
+  const stoks = tokenize(sent);
+  if (!stoks.length) return 0;
+  let s = 0;
+  qTokens.forEach(t => {
+    const tf = stoks.filter(x => x === t).length;
+    if (tf > 0) s += tf * (IDF.get(t) || 0);
   });
-  return dot;
-}
-
-let CACHE = null;
-function loadCorpus() {
-  if (CACHE) return CACHE;
-  const basePath = path.join(path.dirname(__dirname), "corpus", "corpus.json");
-  const tmpPath  = "/tmp/corpus.generated.json";
-  const baseRaw = safeReadJSON(basePath) || [];
-  const genRaw  = safeReadJSON(tmpPath) || [];
-  const all = [...baseRaw, ...genRaw].map(normalizeDoc).filter(Boolean);
-  const aliases = loadAliases();
-  const tfidf = buildTfIdf(all);
-  CACHE = { docs: all, aliases, tfidf };
-  console.log("[INFO] RAG loaded:", all.length, "docs.");
-  return CACHE;
-}
-
-function expandQueryWithAliases(q, aliases) {
-  if (!aliases || !Object.keys(aliases).length) return q;
-  const low = q.toLowerCase();
-  for (const [key, arr] of Object.entries(aliases)) {
-    if (low.includes(key)) {
-      const extra = (arr||[]).join(" ");
-      q += ` ${extra}`;
-    }
+  // pequenos boosts se a sentença contém marcadores relacionais
+  if (relWeight > 1 && /(esposa|marido|filho|filha|m[ãa]e|pai|wife|husband|children|mother|father|parents)/i.test(sent)) {
+    s *= relWeight;
   }
-  return q;
+  return s;
 }
 
-export async function search(query, opts = {}) {
-  const threshold = Number(opts.threshold || 0.45);
-  const { docs, aliases, tfidf } = loadCorpus();
+function bestSentencesForQuery(text, query, maxSent = 3, isRel=false) {
+  const qTokens = tokenize(query);
+  const sents = splitSentences(text).slice(0, 40); // corta para desempenho
+  if (!sents.length) return "";
 
-  // Query expand
-  let q = expandQueryWithAliases(query || "", aliases).trim();
+  const relWeight = isRel ? 1.6 : 1.0;
+  const scored = sents
+    .map((s, idx) => ({ idx, s, score: sentenceScore(s, qTokens, relWeight) }))
+    .sort((a,b) => b.score - a.score);
+
+  // se nada casou, devolve as 2 primeiras para contexto básico
+  const top = (scored[0]?.score || 0) > 0 ? scored.slice(0, maxSent) : sents.slice(0, Math.min(2, sents.length)).map((s, i) => ({ idx:i, s }));
+
+  // mantém ordem original
+  const ordered = [...top].sort((a,b) => a.idx - b.idx).map(x => x.s.trim());
+  return ordered.join(" ");
+}
+
+// -------------------- busca pública --------------------
+export async function search({ query, threshold = 0.5, prevSubject = null, lang = "pt" } = {}) {
+  const q = (query || "").trim();
   const qTokens = tokenize(q);
-  const { vec: qvec, norm: qnorm } = vectorize(qTokens, tfidf.idf);
+  const qVec = buildVec(qTokens);
 
-  // Score por doc
-  const scored = docs.map((d, i) => {
-    const dTokens = tfidf.tokenized[i];
-    const { vec: dvec, norm: dnorm } = vectorize(dTokens, tfidf.idf);
-    let score = cosine(qvec, dvec) / (qnorm * dnorm || 1);
+  // ranqueia documentos por cosseno
+  const baseScores = DOC_VEC.map((dv, i) => ({ i, score: cosine(qVec, dv) }));
 
-    // Boost de título: overlap n-gram de 2
-    const titleTokens = tokenize(d.title);
-    const q2 = ngrams(qTokens, 2);
-    const t2 = ngrams(titleTokens, 2);
-    let overlap2 = 0;
-    q2.forEach(n => { if (t2.has(n)) overlap2 += 1; });
-    score += overlap2 * 0.08;
-
-    return { doc: d, score };
+  const relational = isRelationalQuery(q);
+  // aplica boosts de título quando relacional e há subject ativo
+  const boosted = baseScores.map(({ i, score }) => {
+    let s = score;
+    if (relational && prevSubject) s += relationalTitleBoost(CORPUS[i].title, prevSubject);
+    // leve boost se o título contém termos da pergunta
+    const titleTok = tokenize(CORPUS[i].title);
+    const overlap = qTokens.filter(t => titleTok.includes(t)).length;
+    if (overlap) s += Math.min(0.05, overlap * 0.01);
+    return { i, score: s };
   });
 
-  // Ordena por score (top 8) e reranking leve por tópico (overlap no corpo)
-  scored.sort((a,b)=> b.score - a.score);
-  const top = scored.slice(0, 8);
-  const qBody = ngrams(qTokens, 2);
-  top.forEach(t => {
-    const bodyToks = tokenize(t.doc.text);
-    const body2 = ngrams(bodyToks, 2);
-    let ov = 0;
-    qBody.forEach(n => { if (body2.has(n)) ov += 1; });
-    t.score += ov * 0.02;
+  boosted.sort((a,b) => b.score - a.score);
+
+  const best = boosted[0] || { i: 0, score: 0 };
+  const pass = (best.score || 0) >= threshold;
+
+  // top-k para contexto
+  const topIdx = boosted.slice(0, 3).map(s => s.i);
+
+  // monta snippets por pergunta (question-aware)
+  const topDocs = topIdx.map(i => {
+    const d = CORPUS[i];
+    const snippet = bestSentencesForQuery(d.text, q, 3, relational);
+    return {
+      id: d.id,
+      title: d.title,
+      text: snippet || d.text.slice(0, 600),
+      source: d.source,
+      date: d.date,
+      score: boosted.find(s => s.i === i)?.score || 0,
+    };
   });
-  top.sort((a,b)=> b.score - a.score);
 
-  const best = top[0];
-  const pass = !!(best && best.score >= threshold); // GATING ESTRITO
-
-  // Snippets: 1–2 frases do melhor doc
-  let snippets = [];
+  // subject
   let subject = null;
-  let sources = [];
-  if (best) {
-    snippets = firstSentences(best.doc.text, 2);
-    subject = best.doc.title || null;
-    sources = top.slice(0, 3).map(t => ({ id: t.doc.id, title: t.doc.title, source: t.doc.source, date: t.doc.date, score: Number(t.score.toFixed(3)) }));
+  if (pass) {
+    subject = subjectFromTitle(CORPUS[best.i].title);
+  } else if (relational && prevSubject) {
+    subject = prevSubject; // herda para perguntas do tipo “esposa dele?”
   }
 
   return {
     pass,
-    score: best ? Number(best.score.toFixed(3)) : 0,
+    bestScore: best.score || 0,
     subject,
-    snippets,
-    sources
+    topDocs,
+    resolvedQuery: q,
   };
 }
+
+// compat: default
+export default { search, corpusSize };
