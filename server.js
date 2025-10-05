@@ -1,13 +1,11 @@
-// server.js — True Live v2.10.0 (RAG threshold estrito + memória robusta)
-// - /twilio/whatsapp: ACK imediato (se Twilio configurado) e resposta final
-// - Memória de assunto: salva/restaura por contato (Postgres). TTL 24h
-// - RAG: só passa se score >= RAG_THRESHOLD
-// - Fallback: sempre responde; preserva subject para perguntas relacionais
-// - /admin/health: status do serviço
+// server.js — True Live v2.10.1
+// - RAG threshold estrito + memória de assunto via Postgres
+// - Fallback garantido e consciente de contexto
+// - /admin/health com status e contagem do corpus
+// - Logger embutido (dispensa "morgan")
 
 import express from "express";
 import bodyParser from "body-parser";
-import morgan from "morgan";
 import pkg from "pg";
 import { config as dotenv } from "dotenv";
 dotenv();
@@ -36,10 +34,23 @@ const CONFIG = {
   ANSWER_OUTSIDE_CORPUS_FIRST_N: +(process.env.ANSWER_OUTSIDE_CORPUS_FIRST_N || 1),
 };
 
+// ---------- APP ----------
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
-app.use(morgan("tiny"));
+
+// Logger embutido (substitui morgan)
+app.use((req, res, next) => {
+  const t0 = Date.now();
+  res.on("finish", () => {
+    if (CONFIG.LOG_LEVEL !== "silent") {
+      console.log(
+        `[REQ] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${Date.now() - t0}ms)`
+      );
+    }
+  });
+  next();
+});
 
 // ---------- TWILIO (opcional) ----------
 let twilioClient = null;
@@ -56,15 +67,13 @@ const openai = new OpenAI({ apiKey: CONFIG.OPENAI_API_KEY });
 let pool = null;
 if (CONFIG.DB_URL) {
   pool = new Pool({ connectionString: CONFIG.DB_URL, ssl: { rejectUnauthorized: false } });
-  // cria tabela se não existir
   await pool.query(`
     CREATE TABLE IF NOT EXISTS subjects (
       id SERIAL PRIMARY KEY,
-      phone TEXT NOT NULL,
+      phone TEXT NOT NULL UNIQUE,
       subject TEXT NOT NULL,
       updated_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
-    CREATE INDEX IF NOT EXISTS idx_subject_phone ON subjects(phone);
   `);
 }
 
@@ -73,61 +82,57 @@ async function saveSubject(phone, subject) {
   await pool.query(
     `INSERT INTO subjects (phone, subject, updated_at)
      VALUES ($1,$2,NOW())
-     ON CONFLICT (id) DO NOTHING;`
-  ).catch(() => {});
-  await pool.query(
-    `UPDATE subjects SET subject=$2, updated_at=NOW()
-     WHERE phone=$1;`,
+     ON CONFLICT (phone) DO UPDATE SET subject=EXCLUDED.subject, updated_at=NOW();`,
     [phone, subject]
-  ).catch(() => {});
+  );
 }
 
 async function loadSubject(phone) {
   if (!pool || !phone) return null;
   const { rows } = await pool.query(
-    `SELECT subject, updated_at
-     FROM subjects
-     WHERE phone=$1
-     ORDER BY updated_at DESC
-     LIMIT 1;`,
+    `SELECT subject, updated_at FROM subjects WHERE phone=$1 LIMIT 1;`,
     [phone]
   );
   if (!rows.length) return null;
-  // TTL 24h
   const updated = new Date(rows[0].updated_at).getTime();
-  const ageMs = Date.now() - updated;
-  if (ageMs > 24 * 3600 * 1000) return null;
+  if (Date.now() - updated > 24 * 3600 * 1000) return null; // TTL 24h
   return rows[0].subject;
 }
 
 // ---------- UTIL ----------
 function guessLang(text) {
   const t = (text || "").toLowerCase();
-  if (/[áàãâéêíóôõúç]/.test(t) || / quem | qual | onde | como /.test(` ${t} `)) return "pt";
+  if (/[áàãâéêíóôõúç]/.test(t) || /\b(quem|qual|onde|como)\b/.test(t)) return "pt";
   if (/\b(qué|quién|dónde|cuál|cómo)\b/.test(t)) return "es";
   return "en";
 }
-
 function looksRelational(q) {
   const t = ` ${q.toLowerCase()} `;
   return [
-    "esposa", "marido", "filho", "filha", "mãe", "mae", "pai", "sogro", "sogra",
-    "dele", "dela", "seus", "seu", "sua", "onde nasceu", "onde ele nasceu", "onde ela nasceu",
-    "where was", "his wife", "her husband", "children", "mother", "father", "parents",
+    "esposa","marido","filho","filha","mãe","mae","pai","sogro","sogra",
+    "dele","dela","seus","seu","sua","onde nasceu","onde ele nasceu","onde ela nasceu",
+    "where was","his wife","her husband","children","mother","father","parents",
   ].some(k => t.includes(k));
 }
+function formatSources(top) {
+  return top.map(d => d.title).join(" | ");
+}
 
-async function composeWithOpenAI({ lang, subject, query, docs, scope }) {
+async function waSend(to, body) {
+  if (!twilioClient || !CONFIG.TWILIO_FROM) return;
+  await twilioClient.messages.create({ from: CONFIG.TWILIO_FROM, to, body });
+}
+
+// ---------- OPENAI HELPERS ----------
+async function composeWithOpenAI({ lang, subject, query, docs }) {
   const sys =
     lang === "pt"
-      ? `Você é um assistente que responde com exatidão e em até 1200 caracteres. Cite fatos apenas do material fornecido no "Contexto".`
+      ? `Você é um assistente que responde com exatidão e em até 1200 caracteres. Cite fatos apenas do "Contexto".`
       : lang === "es"
-      ? `Eres un asistente que responde con precisión y en hasta 1200 caracteres. Cita hechos solo del material en el "Contexto".`
+      ? `Eres un asistente que responde con precisión y en hasta 1200 caracteres. Cita hechos solo del "Contexto".`
       : `You are a precise assistant. Keep answers under 1200 characters. Use only facts from "Context".`;
 
-  const ctx = docs
-    .map((d, i) => `#${i + 1} ${d.title}\n${d.text}`)
-    .join("\n\n");
+  const ctx = docs.map((d,i)=>`#${i+1} ${d.title}\n${d.text}`).join("\n\n");
 
   const prompt =
     (lang === "pt"
@@ -149,135 +154,100 @@ async function composeWithOpenAI({ lang, subject, query, docs, scope }) {
   return comp.choices?.[0]?.message?.content?.trim() || "";
 }
 
-function formatSources(top) {
-  return top.map(d => d.title).join(" | ");
-}
-
-async function waSend(to, body) {
-  if (!twilioClient || !CONFIG.TWILIO_FROM) return;
-  await twilioClient.messages.create({
-    from: CONFIG.TWILIO_FROM,
-    to,
-    body,
-  });
-}
-
-// ---------- ROTA HEALTH ----------
+// ---------- HEALTH ----------
 app.get("/admin/health", async (req, res) => {
   const token = req.query.token || req.headers["x-admin-token"];
-  if (token !== CONFIG.ADMIN_TOKEN) return res.status(403).json({ ok: false, error: "forbidden" });
-
-  res.json({
-    status: "ok",
-    version: "v2.10.0",
-    corpus_items: corpusSize(),
-    db: !!pool,
-  });
+  if (token !== CONFIG.ADMIN_TOKEN) return res.status(403).json({ ok:false, error:"forbidden" });
+  res.json({ status:"ok", version:"v2.10.1", corpus_items: corpusSize(), db: !!pool });
 });
 
 // ---------- WHATSAPP ----------
 app.post("/twilio/whatsapp", async (req, res) => {
-  const from = req.body?.From;       // "whatsapp:+55119..."
+  const from = req.body?.From;             // "whatsapp:+5511..."
   const body = (req.body?.Body || "").trim();
-
-  // ACK imediato (se Twilio configurado)
-  if (twilioClient && from) {
-    try { await waSend(from, "✅ Recebido, pensando..."); } catch {}
-  }
-
-  handleIncoming({ from, body })
-    .then(async (reply) => {
-      // envia pelo Twilio, se disponível; senão responde HTTP
-      if (twilioClient && from) {
-        try { await waSend(from, reply.text); } catch {}
-        return res.sendStatus(200);
-      } else {
-        return res.json({ ok: true, ...reply });
-      }
-    })
-    .catch((err) => {
-      console.error("[ERROR] handleIncoming:", err?.message);
-      if (twilioClient && from) return res.sendStatus(200);
-      return res.status(500).json({ ok: false, error: "internal_error" });
-    });
-});
-
-async function handleIncoming({ from, body }) {
   const lang = guessLang(body);
-  const previousSubject = from ? await loadSubject(from) : null;
+  const prevSubject = from ? await loadSubject(from) : null;
 
-  // 1) Executa RAG com limiar estrito
-  const rag = await hybridSearch({
-    query: body,
-    lang,
-    threshold: CONFIG.RAG_THRESHOLD,
-    prevSubject: previousSubject,
-  });
+  // ACK rápido se houver Twilio
+  if (twilioClient && from) { try { await waSend(from, "✅ Recebido, pensando..."); } catch {} }
 
-  if (CONFIG.LOG_LEVEL === "info") {
-    console.log("[INFO] RAG", {
-      score: rag.bestScore?.toFixed?.(3),
-      pass: rag.pass,
-      subject: rag.subject || null,
-      resolvedQuery: rag.resolvedQuery,
-    });
-  }
-
-  // 2) Se RAG passou, compõe com OpenAI usando apenas docs top-k
-  if (rag.pass) {
-    const text = await composeWithOpenAI({
+  try {
+    // 1) RAG com limiar estrito
+    const rag = await hybridSearch({
+      query: body,
       lang,
-      subject: rag.subject,
-      query: rag.resolvedQuery,
-      docs: rag.topDocs,
-      scope: "in",
+      threshold: CONFIG.RAG_THRESHOLD,
+      prevSubject,
     });
 
-    const suffix =
-      lang === "pt"
-        ? `\n\nBaseado no acervo.\nFontes: ${formatSources(rag.topDocs)}`
-        : lang === "es"
-        ? `\n\nBasado en el acervo.\nFuentes: ${formatSources(rag.topDocs)}`
-        : `\n\nBased on the corpus.\nSources: ${formatSources(rag.topDocs)}`;
+    if (CONFIG.LOG_LEVEL === "info") {
+      console.log("[INFO] RAG", {
+        score: rag.bestScore?.toFixed?.(3),
+        pass: rag.pass,
+        subject: rag.subject || null,
+        resolvedQuery: rag.resolvedQuery,
+      });
+    }
 
-    // salva subject (se mudou)
-    if (from && rag.subject) await saveSubject(from, rag.subject);
+    let replyText = "";
+    if (rag.pass) {
+      // 2) Geração baseada no acervo
+      const text = await composeWithOpenAI({
+        lang,
+        subject: rag.subject,
+        query: rag.resolvedQuery,
+        docs: rag.topDocs,
+      });
+      const suffix =
+        lang === "pt"
+          ? `\n\nBaseado no acervo.\nFontes: ${formatSources(rag.topDocs)}`
+          : lang === "es"
+          ? `\n\nBasado en el acervo.\nFuentes: ${formatSources(rag.topDocs)}`
+          : `\n\nBased on the corpus.\nSources: ${formatSources(rag.topDocs)}`;
 
-    return { scope: "in", text: `${text}${suffix}`, subject: rag.subject };
+      replyText = `${text}${suffix}`;
+      if (from && rag.subject) await saveSubject(from, rag.subject);
+    } else {
+      // 3) Fallback geral, preservando subject se pergunta relacional
+      const useSubject = looksRelational(body) && prevSubject ? prevSubject : null;
+      const sys =
+        lang === "pt"
+          ? "Você é um assistente geral. Responda de forma clara, sucinta e útil."
+          : lang === "es"
+          ? "Eres un asistente general. Responde de forma clara, sucinta y útil."
+          : "You are a helpful general assistant. Be clear and concise.";
+
+      const comp = await openai.chat.completions.create({
+        model: CONFIG.OPENAI_MODEL,
+        temperature: 0.4,
+        timeout: CONFIG.OPENAI_TIMEOUT_MS,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: body },
+        ],
+      });
+      const answer = comp.choices?.[0]?.message?.content?.trim() || "";
+      const outside =
+        lang === "pt" ? "Resposta geral (fora do acervo)." :
+        lang === "es" ? "Respuesta general (fuera del acervo)." :
+                         "General answer (outside the corpus).";
+      replyText = `${answer}\n\n${outside}`;
+      if (from && useSubject) await saveSubject(from, useSubject);
+    }
+
+    // Envia por Twilio (se disponível) ou responde HTTP
+    if (twilioClient && from) {
+      try { await waSend(from, replyText); } catch {}
+      return res.sendStatus(200);
+    } else {
+      return res.json({ ok: true, text: replyText });
+    }
+  } catch (err) {
+    console.error("[ERROR] /twilio/whatsapp:", err?.message || err);
+    if (twilioClient && from) return res.sendStatus(200);
+    return res.status(500).json({ ok:false, error:"internal_error" });
   }
-
-  // 3) Fallback (fora do acervo) — preserva subject se pergunta relacional
-  const fallbackSubject = looksRelational(body) && previousSubject ? previousSubject : null;
-  const sys =
-    lang === "pt"
-      ? "Você é um assistente geral. Responda de forma clara, sucinta e útil."
-      : lang === "es"
-      ? "Eres un asistente general. Responde de forma clara, sucinta y útil."
-      : "You are a helpful general assistant. Be clear and concise.";
-
-  const comp = await openai.chat.completions.create({
-    model: CONFIG.OPENAI_MODEL,
-    temperature: 0.4,
-    timeout: CONFIG.OPENAI_TIMEOUT_MS,
-    messages: [
-      { role: "system", content: sys },
-      { role: "user", content: body },
-    ],
-  });
-  const answer = comp.choices?.[0]?.message?.content?.trim() || "";
-
-  const outside =
-    lang === "pt"
-      ? "Resposta geral (fora do acervo)."
-      : lang === "es"
-      ? "Respuesta general (fuera del acervo)."
-      : "General answer (outside the corpus).";
-
-  // Atualiza subject se pergunta relacional
-  if (from && fallbackSubject) await saveSubject(from, fallbackSubject);
-
-  return { scope: "out", text: `${answer}\n\n${outside}`, subject: fallbackSubject };
-}
+});
 
 // ---------- START ----------
 app.listen(CONFIG.PORT, () => {
