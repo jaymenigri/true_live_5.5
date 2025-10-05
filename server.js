@@ -1,36 +1,41 @@
-// server.js — True Live v2.10.5 (estável e blindado)
+// server.js — True Live v2.10.6 (estável, sem morgan)
 
 import express from "express";
 import bodyParser from "body-parser";
-import morgan from "morgan";
 import twilio from "twilio";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
 // -------------------------------------------------
-// 1) Express básico
+// 1) Express básico + logger embutido
 // -------------------------------------------------
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-app.use(morgan("tiny"));
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "truelive2025";
 const LOG_LEVEL = (process.env.LOG_LEVEL || "info").toLowerCase();
 
-// Log auxiliar
 function log(level, ...args) {
   const order = { error: 0, warn: 1, info: 2, debug: 3 };
   if (order[level] <= order[LOG_LEVEL]) {
-    const tag = level.toUpperCase();
-    console.log(`[${tag}]`, ...args);
+    console.log(`[${level.toUpperCase()}]`, ...args);
   }
 }
 
+// Logger HTTP simples (substitui morgan)
+app.use((req, res, next) => {
+  const t0 = Date.now();
+  res.on("finish", () => {
+    log("info", "[REQ]", req.method, req.originalUrl, "->", res.statusCode, `(${Date.now() - t0}ms)`);
+  });
+  next();
+});
+
 // -------------------------------------------------
-// 2) Corpus: tenta ./corpus/corpus.json, depois ./corpus.json
+/** 2) Corpus: tenta ./corpus/corpus.json, depois ./corpus.json */
 // -------------------------------------------------
 function readJsonSafe(p) {
   try {
@@ -45,8 +50,8 @@ function readJsonSafe(p) {
 }
 
 let corpusItems = [];
-let corpusPath1 = path.join(__dirname, "corpus", "corpus.json");
-let corpusPath2 = path.join(__dirname, "corpus.json");
+const corpusPath1 = path.join(__dirname, "corpus", "corpus.json");
+const corpusPath2 = path.join(__dirname, "corpus.json");
 corpusItems = readJsonSafe(corpusPath1) || readJsonSafe(corpusPath2) || [];
 log("info", `Corpus loaded: ${corpusItems.length} items.`);
 
@@ -62,7 +67,7 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
   const originalCreate = twilioClient.messages.create;
   twilioClient.messages.create = async (args) => {
-    // Guardião: Twilio não aceita 'timeout' no payload
+    // Guardião: Twilio NÃO aceita 'timeout' no payload
     if (args && Object.prototype.hasOwnProperty.call(args, "timeout")) {
       throw new Error("[Guard] Campo inválido no Twilio payload: 'timeout'");
     }
@@ -84,15 +89,10 @@ async function waSend(to, body) {
     return { ok: false, reason: "invalid_to" };
   }
 
-  const sendPromise = twilioClient.messages.create({
-    from: TWILIO_WHATSAPP_FROM,
-    to,
-    body
-  });
-
+  const sendPromise = twilioClient.messages.create({ from: TWILIO_WHATSAPP_FROM, to, body });
   const result = await Promise.race([
     sendPromise,
-    new Promise((_, rej) => setTimeout(() => rej(new Error("twilio_timeout")), 15000))
+    new Promise((_, rej) => setTimeout(() => rej(new Error("twilio_timeout")), 15000)),
   ]);
 
   if (result && result.sid) {
@@ -146,14 +146,14 @@ app.get("/admin/health", (req, res) => {
   }
   return res.json({
     status: "ok",
-    version: "v2.10.5",
+    version: "v2.10.6",
     corpus_items: corpusItems.length,
-    db: HAS_DB
+    db: HAS_DB,
   });
 });
 
 // -------------------------------------------------
-// 7) Webhook WhatsApp
+// 7) Webhook WhatsApp (ACK imediato; envio assíncrono)
 // -------------------------------------------------
 app.post("/twilio/whatsapp", async (req, res) => {
   const from = (req.body && req.body.From) || "";
@@ -161,23 +161,25 @@ app.post("/twilio/whatsapp", async (req, res) => {
 
   log("info", "[IN]", from, "->", text || "(vazio)");
 
-  // ACK imediato
+  // ACK imediato pro Twilio/WhatsApp
   res.sendStatus(200);
 
   try {
     const ctx = await loadContext(from);
+    const threshold = Number(process.env.RAG_THRESHOLD || "0.5");
+
     const result = await doSearch(text, {
       corpus: corpusItems,
       context: ctx,
-      threshold: Number(process.env.RAG_THRESHOLD || "0.5")
+      threshold,
     });
 
-    // Esperado: { reply, scope, subject, score, pass, sources }
+    // Esperado: { reply, scope, subject, score, pass, resolvedQuery, sources }
     log("info", "[RAG]", {
       score: result?.score?.toFixed ? result.score.toFixed(3) : String(result?.score ?? "?"),
       pass: !!result?.pass,
       subject: result?.subject || null,
-      resolvedQuery: result?.resolvedQuery || text
+      resolvedQuery: result?.resolvedQuery || text,
     });
 
     if (result?.subject) {
