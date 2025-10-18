@@ -1,21 +1,16 @@
 {
   "rss": [
-    "https://www.gov.il/en/departments/news?outputType=rss",
-    "https://www.idf.il/en/rss/",
-    "https://www.yadvashem.org/feeds/articles.rss"
+    "https://www.idf.il/en/feeds/articles/",
+    "https://www.yadvashem.org/rss-en.xml",
+    "https://www.gov.il/en/News.rss"
   ],
   "sitemaps": [
     "https://www.yadvashem.org/sitemap.xml",
-    "https://www.idf.il/sitemap.xml"
+    "https://www.idf.il/en/sitemap.xml"
   ],
-  "domains": [
-    "idf.il",
-    "gov.il",
-    "yadvashem.org",
-    "knesset.gov.il",
-    "mfa.gov.il",
-    "unesco.org",
-    "un.org",
-    "ohchr.org"
+  "allow_paths": [
+    "/en/",
+    "/holocaust",
+    "/about"
   ]
 }

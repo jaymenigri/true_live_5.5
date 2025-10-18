@@ -1,3 +1,4 @@
+// services/ingest.js — v1.3
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
@@ -7,133 +8,95 @@ import { extractMainText } from "./htmlExtract.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const WL_PATH = path.join(__dirname, "..", "config", "whitelist.json");
-let WHITELIST = { rss: [], sitemaps: [], domains: [] };
-try {
-  WHITELIST = JSON.parse(fs.readFileSync(WL_PATH, "utf-8"));
-} catch {}
+function loadJSON(relPath) {
+  const p = path.join(__dirname, "..", relPath);
+  const raw = fs.readFileSync(p, "utf8");
+  return JSON.parse(raw);
+}
+
+const whitelist = loadJSON("config/whitelist.json");
 
 const TIMEOUT_MS = 8000;
-function controllerWithTimeout(ms = TIMEOUT_MS) {
+function withTimeout(ms=TIMEOUT_MS) {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), ms);
-  return { signal: ctrl.signal, cancel: () => clearTimeout(t) };
+  const t = setTimeout(()=>ctrl.abort(), ms);
+  return { signal: ctrl.signal, cancel: ()=>clearTimeout(t) };
 }
 
 async function fetchText(url) {
-  const { signal, cancel } = controllerWithTimeout();
+  const { signal, cancel } = withTimeout();
   try {
-    const r = await fetch(url, { signal, headers: { "User-Agent": "TrueLive/1.0" } });
+    const res = await fetch(url, { signal, redirect: "follow" });
     cancel();
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return await r.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
   } catch (e) {
     cancel();
-    return "";
+    return null;
   }
 }
 
-function withinDomains(u) {
+function isAllowed(url) {
   try {
-    const host = new URL(u).hostname.replace(/^www\./, "");
-    return (WHITELIST.domains || []).some(d => host.endsWith(d));
+    const u = new URL(url);
+    const pathOk = whitelist.allow_paths.length===0 || whitelist.allow_paths.some(p=>u.pathname.includes(p));
+    return pathOk;
   } catch { return false; }
 }
 
-function parseRSS(xml) {
-  const items = [];
-  const reItem = /<item>([\s\S]*?)<\/item>/gi;
-  let m;
-  while ((m = reItem.exec(xml))) {
-    const chunk = m[1];
-    const get = (tag) => {
-      const m2 = new RegExp(`<${tag}[^>]*>([\s\S]*?)<\/${tag}>`, "i").exec(chunk);
-      return m2 ? m2[1].replace(/<[^>]+>/g,"").trim() : "";
-    };
-    const title = get("title");
-    const link = get("link");
-    const pubDate = get("pubDate");
-    if (title && link && withinDomains(link)) {
-      items.push({ title, link, date: pubDate || "" });
-    }
-  }
-  return items;
-}
+export async function ingestAll({ max=50 }={}) {
+  const collected = [];
 
-function parseSitemap(xml) {
-  const urls = [];
-  const reLoc = /<loc>([\s\S]*?)<\/loc>/gi;
-  let m;
-  while ((m = reLoc.exec(xml))) {
-    const u = m[1].trim();
-    if (withinDomains(u)) urls.push(u);
+  // RSS
+  for (const rss of whitelist.rss) {
+    const xml = await fetchText(rss);
+    if (!xml) continue;
+    const items = [...xml.matchAll(/<item>[\s\S]*?<\/item>/g)];
+    for (const m of items.slice(0, max)) {
+      const link = (m[0].match(/<link>(.*?)<\/link>/s)||[])[1] || "";
+      if (!link || !isAllowed(link)) continue;
+      const html = await fetchText(link);
+      if (!html) continue;
+      const { title, text } = await extractMainText(html, link);
+      if (!text || text.length<200) continue;
+      collected.push({ id: link, title: title||link, text, source: link, date: "" });
+    }
   }
-  return urls.slice(0, 100);
-}
 
-export async function ingestAll({ max = 80, mode = "rss,sitemap" } = {}) {
-  const modes = String(mode).split(",").map(s => s.trim());
-  const out = [];
-  if (modes.includes("rss")) {
-    for (const feed of WHITELIST.rss || []) {
-      const xml = await fetchText(feed);
-      if (!xml) continue;
-      const items = parseRSS(xml).slice(0, Math.max(10, Math.min(40, max)));
-      for (const it of items) {
-        const html = await fetchText(it.link);
-        if (!html) continue;
-        const text = extractMainText(html);
-        if (!text || text.length < 400) continue;
-        out.push({
-          id: `auto-${Buffer.from(it.link).toString("base64").slice(0,18)}`,
-          title: it.title.slice(0,200),
-          text: text.slice(0, 1200),
-          source: it.link,
-          date: it.date || ""
-        });
-        if (out.length >= max) break;
-      }
-      if (out.length >= max) break;
+  // Sitemaps
+  for (const sm of whitelist.sitemaps) {
+    const xml = await fetchText(sm);
+    if (!xml) continue;
+    const locs = [...xml.matchAll(/<loc>(.*?)<\/loc>/g)].map(m=>m[1]).slice(0, max);
+    for (const link of locs) {
+      if (!isAllowed(link)) continue;
+      const html = await fetchText(link);
+      if (!html) continue;
+      const { title, text } = await extractMainText(html, link);
+      if (!text || text.length<200) continue;
+      collected.push({ id: link, title: title||link, text, source: link, date: "" });
     }
   }
-  if (out.length < max && modes.includes("sitemap")) {
-    for (const sm of (WHITELIST.sitemaps || [])) {
-      const xml = await fetchText(sm);
-      const urls = parseSitemap(xml);
-      for (const u of urls) {
-        const html = await fetchText(u);
-        const text = extractMainText(html);
-        if (!text || text.length < 600) continue;
-        out.push({
-          id: `auto-${Buffer.from(u).toString("base64").slice(0,18)}`,
-          title: (u.split("/").pop() || "Página").slice(0,200),
-          text: text.slice(0, 1200),
-          source: u,
-          date: ""
-        });
-        if (out.length >= max) break;
-      }
-      if (out.length >= max) break;
-    }
-  }
+
+  const outPath = "/tmp/corpus.generated.json";
+  const existing = fs.existsSync(outPath) ? JSON.parse(fs.readFileSync(outPath,"utf8")) : [];
+  const all = [...existing];
+  const seen = new Set(existing.map(x=>x.id));
   let added = 0;
-  const genPath = "/tmp/corpus.generated.json";
-  if (out.length) {
-    try {
-      fs.writeFileSync(genPath, JSON.stringify(out, null, 2), "utf-8");
-      added = out.length;
-    } catch {}
+  for (const item of collected) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    all.push(item);
+    added++;
   }
-  return { added, file: genPath };
+  if (added>0) fs.writeFileSync(outPath, JSON.stringify(all, null, 2), "utf8");
+  return { added, file: outPath };
 }
 
 export function tryLoadGenerated() {
-  const genPath = "/tmp/corpus.generated.json";
+  const outPath = "/tmp/corpus.generated.json";
+  if (!fs.existsSync(outPath)) return [];
   try {
-    if (!fs.existsSync(genPath)) return [];
-    const raw = fs.readFileSync(genPath, "utf-8");
-    const arr = JSON.parse(raw);
-    if (Array.isArray(arr)) return arr;
-    return [];
+    return JSON.parse(fs.readFileSync(outPath,"utf8"));
   } catch { return []; }
 }

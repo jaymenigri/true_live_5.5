@@ -1,52 +1,41 @@
-import pg from "pg";
-const { Pool } = pg;
-let pool = null;
-let ready = false;
+// services/context.js — v2.10 (Postgres-backed short memory)
+import { Pool } from "pg";
+
+const url = process.env.DATABASE_URL;
+const ssl = url && !/sslmode=/.test(url) ? { rejectUnauthorized: false } : undefined;
+const pool = url ? new Pool({ connectionString: url, ssl }) : null;
+
+async function ensure() {
+  if (!pool) throw new Error("DATABASE_URL ausente.");
+  await pool.query(`
+    create table if not exists tl_context (
+      id serial primary key,
+      user_id text not null,
+      subject text,
+      data jsonb default '{}'::jsonb,
+      updated_at timestamp default now()
+    );
+    create index if not exists tl_context_user on tl_context(user_id);
+  `);
+}
 
 export async function init() {
-  const url = process.env.DATABASE_URL;
-  if (!url) {
-    console.warn("[WARN] Contexto: usando memória local (sem Postgres).");
-    return false;
-  }
-  pool = new Pool({
-    connectionString: url,
-    ssl: { rejectUnauthorized: false }
-  });
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS tl_context (
-      id SERIAL PRIMARY KEY,
-      from_number TEXT NOT NULL,
-      subject TEXT,
-      updated_at TIMESTAMPTZ DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS tl_context_from_idx ON tl_context(from_number);
-  `);
-  ready = true;
-  console.info("[INFO] Postgres conectado.");
-  return true;
+  if (!pool) return { ok:false, db:false };
+  await ensure();
+  return { ok:true, db:true };
 }
 
-export async function setSubject(from, subject) {
-  if (!ready) return;
-  // ensure row exists (simple upsert approach for broad PG versions)
-  try {
-    await pool.query(
-      "INSERT INTO tl_context(from_number, subject) VALUES($1,$2)",
-      [from, subject]
-    );
-  } catch {}
+export async function get(user) {
+  if (!pool) return null;
+  const r = await pool.query("select * from tl_context where user_id=$1 order by updated_at desc limit 1", [user]);
+  return r.rows[0]||null;
+}
+
+export async function remember(user, subject, data={}) {
+  if (!pool) return;
   await pool.query(
-    "UPDATE tl_context SET subject=$2, updated_at=NOW() WHERE from_number=$1",
-    [from, subject]
+    `insert into tl_context (user_id, subject, data, updated_at)
+     values ($1,$2,$3,now())`,
+    [user, subject, data]
   );
-}
-
-export async function getSubject(from) {
-  if (!ready) return null;
-  const r = await pool.query(
-    "SELECT subject FROM tl_context WHERE from_number=$1 ORDER BY updated_at DESC LIMIT 1",
-    [from]
-  );
-  return r.rows[0]?.subject || null;
 }
