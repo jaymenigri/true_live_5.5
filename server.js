@@ -1,145 +1,140 @@
-// server.js — True Live v2.10.8 (Heroku final)
+// ===== True Live v2.10.9-autoingest =====
+// Server principal com ingest automático + integração Twilio + RAG + fallback seguro
+
 import express from "express";
-import bodyParser from "body-parser";
 import morgan from "morgan";
-import fetch from "node-fetch";
-import OpenAI from "openai";
-import twilio from "twilio";
-
-import { search as hybridSearch, loadAll as loadCorpus } from "./services/rag.js";
+import bodyParser from "body-parser";
+import pkg from "pg";
 import { ingestAll } from "./services/ingest.js";
-import { init as ctxInit, get as ctxGet, remember as ctxRemember } from "./services/context.js";
-import { pgPool } from "./db.js";
-import { simpleAnswer } from "./embeddingUtils.js";
+import { loadCorpus } from "./services/context.js";
+import { handleIncoming } from "./controllers/chatController.js";
+import { fileURLToPath } from "url";
+import path from "path";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const twilio = require("twilio");
 
-const PORT = process.env.PORT || 3000;
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "truelive2025";
-const RAG_THRESHOLD = Number(process.env.RAG_THRESHOLD || "0.5");
-const ANSWER_OUTSIDE_CORPUS = process.env.ANSWER_OUTSIDE_CORPUS !== "false";
+const { Pool } = pkg;
 
+// =============================
+// Inicialização do servidor
+// =============================
 const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
+app.use(morgan("dev"));
 app.use(bodyParser.json());
-app.use(morgan(":method :url :status :response-time ms"));
+app.use(bodyParser.urlencoded({ extended: true }));
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// =============================
+// Banco de dados
+// =============================
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+let corpus = [];
+let corpusCount = 0;
+
+// =============================
+// Ingest automático no startup
+// =============================
+try {
+  console.log("[INIT] Executando ingest automático...");
+  const added = await ingestAll();
+  console.log(`[INIT] Ingest concluído. Documentos adicionados: ${added}`);
+} catch (err) {
+  console.warn("[INIT] Ingest automático falhou:", err.message);
+}
+
+try {
+  corpus = await loadCorpus();
+  corpusCount = corpus.length;
+  console.log(`[INFO] Corpus carregado com ${corpusCount} itens.`);
+} catch (err) {
+  console.error("[ERRO] Falha ao carregar corpus:", err.message);
+}
+
+// =============================
+// Twilio Client
+// =============================
 let twilioClient = null;
 if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
-  twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  console.log("[INFO] Twilio client pronto.");
-}
-
-const pool = pgPool();
-let dbReady = false;
-if (pool) {
-  try { await ctxInit(); dbReady = true; }
-  catch (e) { console.log("[WARN] Contexto: falha ao iniciar Postgres:", e.message); }
+  try {
+    twilioClient = twilio(
+      process.env.TWILIO_ACCOUNT_SID,
+      process.env.TWILIO_AUTH_TOKEN
+    );
+    console.log("[INFO] Twilio client pronto.");
+  } catch (err) {
+    console.error("[ERRO] Falha ao inicializar Twilio:", err.message);
+  }
 } else {
-  console.log("[WARN] Contexto: usando memória local (sem Postgres).");
+  console.warn("[WARN] Twilio não configurado.");
 }
 
-const ALL = loadCorpus();
-console.log(`[INFO] Corpus loaded: ${ALL.length} items.`);
-
-function ok(res, payload){ return res.json(payload); }
-function unauthorized(res){ return res.status(401).json({ ok:false, error:"unauthorized" }); }
-
-app.get("/admin/health", (req, res) => {
-  if ((req.query.token||"") !== ADMIN_TOKEN) return unauthorized(res);
-  ok(res, { status:"ok", version:"v2.10.8-heroku-final", corpus_items: ALL.length, db: !!dbReady });
-});
-
-app.get("/admin/ingest/run", async (req,res) => {
-  if ((req.query.token||"") !== ADMIN_TOKEN) return unauthorized(res);
-  const max = Number(req.query.max||"50");
-  const out = await ingestAll({ max });
-  ok(res, { ok:true, result: out, corpus_items: ALL.length + out.added });
-});
-
-app.get("/admin/ingest/status", (req,res) => {
-  if ((req.query.token||"") !== ADMIN_TOKEN) return unauthorized(res);
-  ok(res, { ok:true, corpus_items: ALL.length });
+// =============================
+// Rotas principais
+// =============================
+app.get("/", (req, res) => {
+  res.send("✅ True Live v2.10.9-autoingest rodando com sucesso.");
 });
 
 app.post("/twilio/whatsapp", async (req, res) => {
-  res.status(200).send("OK");
   try {
-    const from = req.body.From || req.body.from;
-    const body = (req.body.Body || req.body.body || "").trim();
-    if (!from || !body) return;
-
-    const prev = await ctxGet(from);
-    const subject = prev?.subject || null;
-    const resolvedQuery = subject && !/^(quem|o que|onde|quando|qual|quais|como)/i.test(body)
-      ? `${body} — assunto atual: ${subject}` : body;
-
-    const rag = hybridSearch(resolvedQuery, { threshold: RAG_THRESHOLD, topK: 3 });
-    console.log("[INFO] RAG", { score: rag.best?.score?.toFixed?.(3) || "0.000", pass: rag.pass, subject, resolvedQuery });
-
-    let reply, scope;
-    if (rag.pass && rag.best) {
-      reply = `${rag.best.snippet}\n\nBaseado no acervo.\nFontes: ${"${rag.top.map(t=>t.title).join(' | ')}"}`;
-      scope = "in";
-      await ctxRemember(from, rag.best.title, { at: Date.now() });
-    } else {
-      const prompt = `Pergunta: ${"${body}"}\n\nSe souber, responda de forma direta e curta. Não invente referência.`;
-      const out = await openai.chat.completions.create({
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-        messages: [
-          { role: "system", content: "Você responde em português (Brasil) de forma clara e direta."},
-          { role: "user", content: prompt }
-        ],
-        temperature: 0.2,
-        max_tokens: 350,
-      });
-      reply = out.choices[0].message.content.trim();
-      if (ANSWER_OUTSIDE_CORPUS) reply += `\n\nResposta geral (fora do acervo).`;
-      scope = "out";
-    }
-
-    if (twilioClient && process.env.TWILIO_MESSAGING_SERVICE_SID) {
-      await twilioClient.messages.create({
-        to: from,
-        messagingServiceSid: process.env.TWILIO_MESSAGING_SERVICE_SID,
-        body: reply
-      });
-    }
-  } catch (e) {
-    console.log("[ERROR] /twilio/whatsapp:", e.message || e);
+    res.sendStatus(200); // responde rápido para evitar timeout do Twilio
+    await handleIncoming(req, twilioClient);
+  } catch (err) {
+    console.error("[ERROR] /twilio/whatsapp:", err.message);
   }
 });
 
-app.post("/whatsapp", express.json(), async (req,res)=>{
-  try{
-    const from = req.body.from || "test";
-    const body = (req.body.text||req.body.body||"").trim();
-    if (!body) return ok(res, { ok:false, error:"empty" });
+// =============================
+// Rotas administrativas
+// =============================
+app.get("/admin/health", async (req, res) => {
+  const token = req.query.token;
+  if (token !== process.env.ADMIN_TOKEN) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
 
-    const prev = await ctxGet(from);
-    const subject = prev?.subject || null;
-    const resolvedQuery = subject && !/^(quem|o que|onde|quando|qual|quais|como)/i.test(body)
-      ? `${body} — assunto atual: ${subject}` : body;
+  let dbStatus = false;
+  try {
+    const client = await pool.connect();
+    await client.query("SELECT NOW()");
+    client.release();
+    dbStatus = true;
+  } catch {
+    dbStatus = false;
+  }
 
-    const rag = hybridSearch(resolvedQuery, { threshold: RAG_THRESHOLD, topK: 3 });
-    let reply, scope;
-    if (rag.pass && rag.best) {
-      reply = `${rag.best.snippet}\n\nBaseado no acervo.\nFontes: ${"${rag.top.map(t=>t.title).join(' | ')}"}`;
-      scope = "in";
-      await ctxRemember(from, rag.best.title, { at: Date.now() });
-    } else {
-      const ans = await (await import("./embeddingUtils.js")).simpleAnswer(body);
-      reply = ans + (ANSWER_OUTSIDE_CORPUS ? `\n\nResposta geral (fora do acervo).` : "");
-      scope = "out";
-    }
-    ok(res, { ok:true, reply, scope, rag });
-  } catch(e){
-    return res.status(500).json({ ok:false, error: String(e) });
+  res.json({
+    status: "ok",
+    version: "v2.10.9-autoingest",
+    corpus_items: corpusCount,
+    db: dbStatus,
+  });
+});
+
+app.get("/admin/ingest/run", async (req, res) => {
+  const token = req.query.token;
+  if (token !== process.env.ADMIN_TOKEN) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  try {
+    const added = await ingestAll();
+    corpus = await loadCorpus();
+    corpusCount = corpus.length;
+    res.json({ added, total: corpusCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/", (_req,res)=> res.send("True Live — OK"));
-app.get("/health", (_req,res)=> res.send("ok"));
-
-app.listen(process.env.PORT || 3000, ()=>{
-  console.log("[INFO] Server up", { port: process.env.PORT || 3000, corpus_items: loadCorpus().length });
+// =============================
+// Inicialização
+// =============================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`[INFO] Server up { port: '${PORT}', corpus_items: ${corpusCount} }`);
 });
