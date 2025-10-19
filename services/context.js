@@ -10,7 +10,7 @@ const pool = new Pool({
 // =======================================================
 // 🔧 Inicialização automática do contexto
 // =======================================================
-export async function initContext() {
+export async function init() {
   try {
     // Cria tabela se não existir
     await pool.query(`
@@ -71,17 +71,5 @@ export async function setSubject(phone, subject) {
     );
   } catch (err) {
     console.warn("[WARN] setSubject/PG:", err.message);
-  }
-}
-
-// =======================================================
-// 🩺 ContextStatus (compatibilidade + status real do DB)
-// =======================================================
-export async function contextStatus() {
-  try {
-    const res = await pool.query("SELECT NOW()");
-    return { status: "ok", db: true, time: res.rows[0].now };
-  } catch {
-    return { status: "error", db: false };
   }
 }
