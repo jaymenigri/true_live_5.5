@@ -10,7 +10,7 @@ const pool = new Pool({
 // =======================================================
 // 🔧 Inicialização automática do contexto
 // =======================================================
-export async function init() {
+export async function initContext() {
   try {
     // Cria tabela se não existir
     await pool.query(`
@@ -72,4 +72,11 @@ export async function setSubject(phone, subject) {
   } catch (err) {
     console.warn("[WARN] setSubject/PG:", err.message);
   }
+}
+
+// =======================================================
+// 🩺 ContextStatus (mantido para compatibilidade com chatController.js)
+// =======================================================
+export function contextStatus() {
+  return { status: "ok", service: "context" };
 }
