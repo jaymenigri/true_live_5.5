@@ -1,58 +1,75 @@
-// services/context.js — conversa/assunto com Postgres (fail-safe em memória)
+// services/context.js
 import pkg from "pg";
 const { Pool } = pkg;
 
-const memory = new Map();
-let pool = null;
-let dbOk = false;
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
-export async function initContext() {
-  const url = process.env.DATABASE_URL;
-  if (!url) {
-    console.warn("[WARN] Contexto: DATABASE_URL ausente, usando memória local.");
-    return { db: false };
-  }
+// =======================================================
+// 🔧 Inicialização automática do contexto
+// =======================================================
+export async function init() {
   try {
-    pool = new Pool({ connectionString: url, ssl: { rejectUnauthorized: false } });
-    await pool.query("create table if not exists tl_context (phone text primary key, subject text, updated_at timestamptz default now())");
-    dbOk = true;
+    // Cria tabela se não existir
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS tl_context (
+        id SERIAL PRIMARY KEY,
+        phone TEXT,
+        subject TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Garante que a coluna "phone" exista (para versões antigas)
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'tl_context' AND column_name = 'phone'
+        ) THEN
+          ALTER TABLE tl_context ADD COLUMN phone TEXT;
+        END IF;
+      END
+      $$;
+    `);
+
     console.log("[INFO] Contexto/PG pronto.");
-  } catch (e) {
-    console.warn("[WARN] Contexto/PG indisponível, usando memória local.", e.message);
-    dbOk = false;
+  } catch (err) {
+    console.error("[ERROR] Falha ao inicializar contexto PG:", err);
   }
-  return { db: dbOk };
+}
+
+// =======================================================
+// 🔍 Funções de contexto
+// =======================================================
+export async function getSubject(phone) {
+  try {
+    const res = await pool.query(
+      "SELECT subject FROM tl_context WHERE phone = $1 ORDER BY updated_at DESC LIMIT 1",
+      [phone]
+    );
+    return res.rows[0]?.subject || null;
+  } catch (err) {
+    console.warn("[WARN] getSubject/PG:", err.message);
+    return null;
+  }
 }
 
 export async function setSubject(phone, subject) {
-  if (!phone) return;
-  if (dbOk) {
-    try {
-      await pool.query(
-        "insert into tl_context(phone, subject) values($1,$2) on conflict(phone) do update set subject=excluded.subject, updated_at=now()",
-        [phone, subject || null]
-      );
-      return;
-    } catch (e) {
-      console.warn("[WARN] setSubject/PG:", e.message);
-    }
+  try {
+    await pool.query(
+      `
+      INSERT INTO tl_context (phone, subject, updated_at)
+      VALUES ($1, $2, NOW())
+      ON CONFLICT (phone) DO UPDATE
+      SET subject = EXCLUDED.subject, updated_at = NOW();
+    `,
+      [phone, subject]
+    );
+  } catch (err) {
+    console.warn("[WARN] setSubject/PG:", err.message);
   }
-  memory.set(phone, { subject, updated_at: Date.now() });
-}
-
-export async function getSubject(phone) {
-  if (!phone) return null;
-  if (dbOk) {
-    try {
-      const r = await pool.query("select subject from tl_context where phone=$1", [phone]);
-      return r.rows[0]?.subject || null;
-    } catch (e) {
-      console.warn("[WARN] getSubject/PG:", e.message);
-    }
-  }
-  return memory.get(phone)?.subject || null;
-}
-
-export function contextStatus() {
-  return dbOk;
 }
