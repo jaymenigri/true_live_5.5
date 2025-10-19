@@ -38,8 +38,10 @@ export async function initContext() {
     `);
 
     console.log("[INFO] Contexto/PG pronto.");
+    return { db: true };
   } catch (err) {
     console.error("[ERROR] Falha ao inicializar contexto PG:", err.message);
+    return { db: false };
   }
 }
 
