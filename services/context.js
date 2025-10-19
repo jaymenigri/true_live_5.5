@@ -10,13 +10,13 @@ const pool = new Pool({
 // =======================================================
 // 🔧 Inicialização automática do contexto
 // =======================================================
-export async function init() {
+export async function initContext() {
   try {
     // Cria tabela se não existir
     await pool.query(`
       CREATE TABLE IF NOT EXISTS tl_context (
         id SERIAL PRIMARY KEY,
-        phone TEXT,
+        phone TEXT UNIQUE,
         subject TEXT,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
@@ -64,12 +64,25 @@ export async function setSubject(phone, subject) {
       `
       INSERT INTO tl_context (phone, subject, updated_at)
       VALUES ($1, $2, NOW())
-      ON CONFLICT (phone) DO UPDATE
-      SET subject = EXCLUDED.subject, updated_at = NOW();
+      ON CONFLICT (phone)
+      DO UPDATE SET subject = EXCLUDED.subject, updated_at = NOW();
     `,
       [phone, subject]
     );
   } catch (err) {
     console.warn("[WARN] setSubject/PG:", err.message);
+  }
+}
+
+// =======================================================
+// 📊 Status do contexto (requerido por chatController.js)
+// =======================================================
+export async function contextStatus() {
+  try {
+    const res = await pool.query("SELECT COUNT(*) FROM tl_context;");
+    return { total: parseInt(res.rows[0].count, 10) };
+  } catch (err) {
+    console.warn("[WARN] contextStatus/PG:", err.message);
+    return { total: 0 };
   }
 }
