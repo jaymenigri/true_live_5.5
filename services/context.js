@@ -75,8 +75,13 @@ export async function setSubject(phone, subject) {
 }
 
 // =======================================================
-// 🩺 ContextStatus (mantido para compatibilidade com chatController.js)
+// 🩺 ContextStatus (compatibilidade + status real do DB)
 // =======================================================
-export function contextStatus() {
-  return { status: "ok", service: "context" };
+export async function contextStatus() {
+  try {
+    const res = await pool.query("SELECT NOW()");
+    return { status: "ok", db: true, time: res.rows[0].now };
+  } catch {
+    return { status: "error", db: false };
+  }
 }
