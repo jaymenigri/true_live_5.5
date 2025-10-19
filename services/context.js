@@ -2,17 +2,20 @@
 import pkg from "pg";
 const { Pool } = pkg;
 
+// =======================================================
+// 🔧 Conexão com o PostgreSQL
+// =======================================================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
 // =======================================================
-// 🔧 Inicialização automática do contexto
+// ⚙️ Inicialização automática do contexto
 // =======================================================
 export async function initContext() {
   try {
-    // Cria tabela se não existir
+    // Cria tabela caso não exista
     await pool.query(`
       CREATE TABLE IF NOT EXISTS tl_context (
         id SERIAL PRIMARY KEY,
@@ -22,7 +25,7 @@ export async function initContext() {
       );
     `);
 
-    // Garante que a coluna "phone" exista (para versões antigas)
+    // Verifica se a coluna phone existe (migrações antigas)
     await pool.query(`
       DO $$
       BEGIN
@@ -38,12 +41,12 @@ export async function initContext() {
 
     console.log("[INFO] Contexto/PG pronto.");
   } catch (err) {
-    console.error("[ERROR] Falha ao inicializar contexto PG:", err);
+    console.error("[ERROR] Falha ao inicializar contexto PG:", err.message);
   }
 }
 
 // =======================================================
-// 🔍 Funções de contexto
+// 🔍 Recuperar último assunto (subject)
 // =======================================================
 export async function getSubject(phone) {
   try {
@@ -58,6 +61,9 @@ export async function getSubject(phone) {
   }
 }
 
+// =======================================================
+// 💾 Armazenar ou atualizar assunto
+// =======================================================
 export async function setSubject(phone, subject) {
   try {
     await pool.query(
@@ -75,14 +81,14 @@ export async function setSubject(phone, subject) {
 }
 
 // =======================================================
-// 📊 Status do contexto (requerido por chatController.js)
+// 🧠 Verificar status do contexto (usado em chatController.js)
 // =======================================================
 export async function contextStatus() {
   try {
     const res = await pool.query("SELECT COUNT(*) FROM tl_context;");
-    return { total: parseInt(res.rows[0].count, 10) };
+    return { db: true, total: parseInt(res.rows[0].count, 10) || 0 };
   } catch (err) {
     console.warn("[WARN] contextStatus/PG:", err.message);
-    return { total: 0 };
+    return { db: false, total: 0 };
   }
 }
