@@ -3,7 +3,7 @@ import pkg from "pg";
 const { Pool } = pkg;
 
 // =======================================================
-// 🔧 Conexão com o PostgreSQL
+// 🔧 Conexão PostgreSQL
 // =======================================================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -15,7 +15,6 @@ const pool = new Pool({
 // =======================================================
 export async function initContext() {
   try {
-    // Cria tabela caso não exista
     await pool.query(`
       CREATE TABLE IF NOT EXISTS tl_context (
         id SERIAL PRIMARY KEY,
@@ -25,7 +24,6 @@ export async function initContext() {
       );
     `);
 
-    // Verifica se a coluna phone existe (migrações antigas)
     await pool.query(`
       DO $$
       BEGIN
@@ -46,7 +44,7 @@ export async function initContext() {
 }
 
 // =======================================================
-// 🔍 Recuperar último assunto (subject)
+// 🔍 Buscar último subject
 // =======================================================
 export async function getSubject(phone) {
   try {
@@ -62,7 +60,7 @@ export async function getSubject(phone) {
 }
 
 // =======================================================
-// 💾 Armazenar ou atualizar assunto
+// 💾 Gravar ou atualizar subject
 // =======================================================
 export async function setSubject(phone, subject) {
   try {
@@ -81,14 +79,14 @@ export async function setSubject(phone, subject) {
 }
 
 // =======================================================
-// 🧠 Verificar status do contexto (usado em chatController.js)
+// 🧠 Status do contexto — usado por chatController.js
 // =======================================================
 export async function contextStatus() {
   try {
-    const res = await pool.query("SELECT COUNT(*) FROM tl_context;");
-    return { db: true, total: parseInt(res.rows[0].count, 10) || 0 };
+    await pool.query("SELECT 1;");
+    return { db: true }; // <<< O ponto crucial
   } catch (err) {
     console.warn("[WARN] contextStatus/PG:", err.message);
-    return { db: false, total: 0 };
+    return { db: false };
   }
 }
