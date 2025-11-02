@@ -1,25 +1,14 @@
-// server.js — True Live v2.10.9 (PG-STABLE-FULL)
-import express from "express";
-import morgan from "morgan";
-import { createServer } from "http";
-import { chatWebhook, adminHealth } from "./controllers/chatController.js";
+const express = require('express');
+const bodyParser = require('body-parser');
+const { handleWhatsAppMessage } = require('./twilioHandler');
+const { pool } = require('./db');
 
 const app = express();
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
-app.use(morgan("tiny"));
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
 
-// Health/Admin
-app.get("/admin/health", adminHealth);
+app.get('/', (req, res) => res.send('True Live ativo.'));
+app.post('/twilio/whatsapp', handleWhatsAppMessage);
 
-// Twilio WhatsApp webhook
-app.post("/twilio/whatsapp", chatWebhook);
-
-// Root
-app.get("/", (req, res) => res.status(200).send("True Live v2.10.9 — online"));
-
-// Boot
-const PORT = process.env.PORT || 3000;
-createServer(app).listen(PORT, () => {
-  console.log(`[INFO] Server up on ${PORT}`);
-});
+pool.connect().then(() => console.info('[INFO] Contexto/PG pronto.'));
+app.listen(process.env.PORT || 3000, () => console.info('[INFO] Server ativo.'));
