@@ -4,17 +4,21 @@ const twilio = require('twilio')(process.env.TWILIO_SID, process.env.TWILIO_TOKE
 
 async function handleWhatsAppMessage(req, res) {
   try {
-    const from = req.body.From || '';
-    // Remove "whatsapp:" e deixa só números
-    const phoneRaw = from.replace('whatsapp:', '').replace(/\D/g, '');
-    const phone = phoneRaw.length > 10 ? phoneRaw : null;
+    console.info('[DEBUG] Corpo da requisição:', req.body);
 
-    if (!phone) {
+    if (!req.body || typeof req.body.From !== 'string' || req.body.From.trim() === '') {
+      console.error('[ERROR] Campo From está ausente ou inválido na requisição:', req.body);
+      return res.status(400).send('Campo From inválido.');
+    }
+
+    const from = req.body.From;
+    const phoneRaw = from.replace('whatsapp:', '').replace(/\D/g, '');
+    if (phoneRaw.length < 10) {
       console.error('[ERROR] Número de telefone inválido ou vazio:', from);
       return res.status(400).send('Número de telefone inválido.');
     }
-
-    const query = req.body.Body?.trim() || '';
+    const phone = phoneRaw;
+    const query = (req.body.Body || '').trim();
 
     console.info('[INFO] Mensagem recebida:', { phone, query });
 
@@ -22,25 +26,19 @@ async function handleWhatsAppMessage(req, res) {
     const baseQuery = previous ? `${previous.prompt} ${query}` : query;
 
     const context = searchContext(baseQuery);
-    let answer;
-
-    if (context.pass) {
-      answer = context.response;
-    } else {
-      answer = `Não encontrei nada específico, mas posso te ajudar: ${query}`;
-    }
+    let answer = context.pass ? context.response : `Não encontrei nada específico, mas posso te ajudar: ${query}`;
 
     await setSubject(phone, 'last_topic', { prompt: query, reply: answer });
 
     await twilio.messages.create({
-      from: 'whatsapp:+14155238886', // Número oficial Twilio WhatsApp
-      to: `whatsapp:+${phone}`,      // Telefone formatado corretamente
-      body: answer
+      from: 'whatsapp:+14155238886',
+      to: `whatsapp:+${phone}`,
+      body: answer,
     });
 
     res.sendStatus(200);
   } catch (error) {
-    console.error('Erro no handler WhatsApp:', error);
+    console.error('[ERROR] Erro no handler WhatsApp:', error);
     res.status(500).send('Erro interno do servidor.');
   }
 }
