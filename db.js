@@ -1,26 +1,28 @@
-const { Pool } = require('pg');
+import pkg from 'pg';
+const { Pool } = pkg;
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
 });
 
-// Salva contexto do usuário por telefone
-async function setSubject(phone, subject, data = {}) {
-  await pool.query(
-    `INSERT INTO tlcontext (phone, subject, data, created_at, updated_at)
-    VALUES ($1, $2, $3, NOW(), NOW())
-    ON CONFLICT (phone) DO UPDATE SET subject=$2, data=$3, updated_at=NOW()`,
-    [phone, subject, JSON.stringify(data)]
-  );
-}
-
-// Recupera o contexto salvo de um telefone
-async function getSubject(phone, subject) {
-  const result = await pool.query(
-    `SELECT * FROM tlcontext WHERE phone=$1 AND subject=$2 ORDER BY updated_at DESC LIMIT 1`,
+export async function getSubject(phone, subject) {
+  const res = await pool.query(
+    'SELECT data FROM tlcontext WHERE phone = $1 AND subject = $2',
     [phone, subject]
   );
-  return result.rows[0];
+  if (res.rows.length > 0) {
+    return res.rows[0].data;
+  }
+  return null;
 }
 
-module.exports = { setSubject, getSubject, pool };
+export async function setSubject(phone, subject, data) {
+  const res = await pool.query(
+    `INSERT INTO tlcontext (phone, subject, data, created_at, updated_at)
+     VALUES ($1, $2, $3, NOW(), NOW())
+     ON CONFLICT (phone, subject) DO UPDATE SET data = EXCLUDED.data, updated_at=NOW()`,
+    [phone, subject, data]
+  );
+  return res;
+}
