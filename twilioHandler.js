@@ -4,8 +4,14 @@ const twilio = require('twilio')(process.env.TWILIO_SID, process.env.TWILIO_TOKE
 
 async function handleWhatsAppMessage(req, res) {
   const from = req.body.From || '';
-  const phone = from.replace('whatsapp:+', '');
+  const phoneRaw = from.replace('whatsapp:', '').replace(/\D/g, ''); // Remove tudo exceto números
+  const phone = phoneRaw.length > 0 ? phoneRaw : null;
   const query = req.body.Body?.trim() || '';
+
+  if (!phone) {
+    console.error('[ERROR] Número de telefone inválido ou vazio:', from);
+    return res.status(400).send('Número de telefone inválido.');
+  }
 
   console.info('[INFO] Mensagem recebida:', { phone, query });
 
@@ -24,8 +30,8 @@ async function handleWhatsAppMessage(req, res) {
   await setSubject(phone, 'last_topic', { prompt: query, reply: answer });
 
   await twilio.messages.create({
-    from: 'whatsapp:+14155238886',
-    to: `whatsapp:+${phone}`,
+    from: 'whatsapp:+14155238886', // Número oficial Twilio WhatsApp
+    to: `whatsapp:+${phone}`,      // Formata telefone corretamente para Twilio
     body: answer
   });
 
